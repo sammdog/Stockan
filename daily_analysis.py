@@ -29,7 +29,6 @@ def main_pipeline(forecast_days=14, output_mode="tg"):
     import pandas as pd
     import requests
     from datetime import date, timedelta
-    import matplotlib.pyplot as plt
     import lightgbm
     from lightgbm import LGBMClassifier
     from lightgbm import LGBMRegressor
