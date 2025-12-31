@@ -2,20 +2,13 @@ name: Daily Stock Analysis
 
 on:
   schedule:
-    # Запускать каждый день в 7:00 по UTC (10:00 по Москве)
-    - cron: '0 7 * * *'
-  # Также можно запускать вручную из интерфейса GitHub
+    - cron: '0 7 * * *'  # 10:00 по Москве
   workflow_dispatch:
-    inputs:
-      manual_run:
-        description: 'Запустить анализ вручную'
-        required: false
-        default: 'false'
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # Даем 20 минут на выполнение
+    timeout-minutes: 30
     
     steps:
     - name: 📥 Checkout code
@@ -29,31 +22,68 @@ jobs:
     - name: 📦 Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install requests pandas numpy lightgbm scikit-learn joblib google-auth google-api-python-client
     
-    - name: 🔍 Run analysis
+    - name: 🔍 Проверка необходимых файлов
+      run: |
+        echo "📁 Проверяю наличие файлов в репозитории..."
+        ls -la
+        
+        echo ""
+        echo "🔍 Проверяю наличие usd_data.json..."
+        if [ -f "usd_data.json" ]; then
+          echo "✅ Файл usd_data.json найден"
+          echo "📏 Размер: $(wc -c < usd_data.json) байт"
+          echo "📄 Первые 100 символов:"
+          head -c 100 usd_data.json
+          echo ""
+        else
+          echo "❌ Файл usd_data.json НЕ НАЙДЕН"
+          echo "📋 Что сделать:"
+          echo "  1. Запустите анализ в Colab"
+          echo "  2. Скачайте usd_github_backup.json"
+          echo "  3. Загрузите в репозиторий как usd_data.json"
+          exit 1
+        fi
+        
+        echo ""
+        echo "🔍 Проверяю наличие daily_analysis_real.py..."
+        if [ -f "daily_analysis_real.py" ]; then
+          echo "✅ Файл daily_analysis_real.py найден"
+        else
+          echo "❌ Файл daily_analysis_real.py НЕ НАЙДЕН"
+          exit 1
+        fi
+    
+    - name: 🚀 Запуск ПОЛНОГО анализа (daily_analysis_real.py)
       env:
         GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
         GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
       run: |
-        python daily_analysis.py
+        echo "🚀 Запускаю ПОЛНЫЙ анализ из daily_analysis_real.py..."
+        python daily_analysis_real.py
     
-    - name: ☁️ Upload to Google Drive
+    - name: ☁️ Загрузка результатов на Google Drive
+      if: success()
       env:
         GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
         GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
       run: |
+        echo "📤 Загружаю результаты на Google Drive..."
         python upload_to_drive.py
     
-    - name: 📊 Report status
-      if: always()
+    - name: 🚨 Уведомление об ошибке
+      if: failure()
       run: |
-        echo "✅ Анализ завершен в $(date)"
-        echo "📅 Следующий запуск: завтра в 10:00 по Москве"
-
-    - name: 📱 Send Telegram notification
-      if: success()
-      run: |
-        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-        -d "chat_id=${{ secrets.YOUR_CHAT_ID }}" \
-        -d "text=✅ Ежедневный анализ завершен! Проверьте /results"
+        echo "🚨 АНАЛИЗ ПРОВАЛЕН!"
+        echo ""
+        echo "📋 Возможные причины:"
+        echo "   1. Отсутствует файл usd_data.json"
+        echo "   2. Ошибка в коде анализа"
+        echo "   3. MOEX API недоступен"
+        echo "   4. Проблемы с зависимостями"
+        echo ""
+        echo "💡 Решение:"
+        echo "   1. Проверьте логи выше"
+        echo "   2. Исправьте ошибку"
+        echo "   3. Перезапустите workflow"
