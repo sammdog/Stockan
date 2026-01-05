@@ -161,10 +161,14 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             combined_frame = combined_frame.merge(df, on='begin', how='inner')
         combined_frame.dropna(inplace=True)
         combined_frame = add_cap_columns(combined_frame, cap[sector])
-        r=combined_frame['begin']
+        
+        # СОХРАНЯЕМ ДАТЫ ДО ОЧИСТКИ
+        dates_before = combined_frame['begin'].copy()
+        
         combined_frame.set_index('begin', inplace=True)
         combined_frame.dropna(inplace=True)
         ccomb=combined_frame.copy()
+        
         j = requests.get(f'http://iss.moex.com/iss/engines/stock/markets/index/securities/{sector}/candles.json?from={startpars}&till=2024-09-25&interval=24').json()
         jo = requests.get(f'http://iss.moex.com/iss/engines/stock/markets/index/securities/{sector}/candles.json?from=2024-09-25&till={today}&interval=24').json()
         dataj = [{k: r[i] for i, k in enumerate(j['candles']['columns'])} for r in j['candles']['data']]
@@ -174,15 +178,29 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         sec = pd.concat([framej, framejo], ignore_index=True)
         sec['begin'] = pd.to_datetime(sec['begin'])
         sec=sec[['begin', 'close']].rename(columns={'close': 'sector'})
-        combined_frame = pd.merge(combined_frame, sec, on='begin', how='inner')
+        
+        # Объединяем с combined_frame (который сейчас имеет индекс 'begin')
+        combined_frame_with_index = combined_frame.copy()
+        combined_frame_with_index = combined_frame_with_index.reset_index()
+        combined_frame = pd.merge(combined_frame_with_index, sec, on='begin', how='inner')
+        combined_frame.set_index('begin', inplace=True)
         combined_frame.dropna(inplace=True)
-        X=combined_frame.drop(columns=['sector','begin'])
+        
+        # УБЕДИТЕСЬ, ЧТО ccomb ИМЕЕТ ТЕ ЖЕ ДАТЫ, ЧТО И combined_frame
+        # Перестраиваем ccomb на основе текущего combined_frame
+        ccomb = combined_frame.copy()
+        
+        X=combined_frame.drop(columns=['sector'])
         y=combined_frame['sector']
         model=LGBMRegressor(random_state=1,verbose=-1)
         model.fit(X,y)
-        pred=model.predict(ccomb)
+        
+        # Используем те же данные для предсказания
+        pred=model.predict(ccomb.drop(columns=['sector']))
+        
+        # Используем даты из индекса ccomb
         sec=pd.DataFrame()
-        sec['begin']=r
+        sec['begin'] = ccomb.index
         sec['sector']=pred
         ind[sector]=sec
         ind[sector] = ind[sector].drop_duplicates(subset='begin', keep='first')
@@ -197,13 +215,22 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     bre['begin'] = pd.to_datetime(bre['begin'])
     bre=bre[['begin', 'close']].rename(columns={'close': 'brent'})
     
-    # === ИЗМЕНЕНИЕ №1: ПУТЬ К ФАЙЛУ USD ===
-    file_pa = 'usd_data.json'  # ВМЕСТО: '/content/drive/MyDrive/usd'
+    # === ИСПРАВЛЕНИЕ: ЗАГРУЗКА USD ДАННЫХ ===
+    file_pa = 'usd_data.json'
     
-    with open(file_pa, 'r') as f:
-        usdtt = pd.read_json(json.load(f))
+    try:
+        with open(file_pa, 'r') as f:
+            usdtt = pd.read_json(json.load(f))
+    except Exception as e:
+        print(f"Ошибка загрузки usd_data.json: {e}")
+        # Создаем пустой DataFrame если файл не найден
+        usdtt = pd.DataFrame(columns=['begin', 'usdt'])
     
-    startusd=usdtt['begin'].iloc[-1]
+    # Если файл пустой, берем последнюю доступную дату
+    if usdtt.empty:
+        startusd = (today - timedelta(days=30)).strftime('%Y-%m-%d')  # 30 дней назад
+    else:
+        startusd = usdtt['begin'].iloc[-1] if 'begin' in usdtt.columns and not usdtt.empty else (today - timedelta(days=30)).strftime('%Y-%m-%d')
     
     import xml.etree.ElementTree as ET
     from datetime import datetime
@@ -222,26 +249,49 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             print(f'Ошибка при запросе данных за {date.strftime("%d/%m/%Y")}: {response.status_code}')
         return None
     
-    start_date = datetime.strptime(startusd, '%Y-%m-%dT%H:%M:%S.%f').date()
+    # Преобразуем startusd в дату
+    try:
+        if isinstance(startusd, str):
+            start_date = datetime.strptime(startusd, '%Y-%m-%dT%H:%M:%S.%f').date()
+        else:
+            start_date = startusd.date() if hasattr(startusd, 'date') else (today - timedelta(days=30))
+    except:
+        start_date = today - timedelta(days=30)
+    
     end_date = today
     
     usd_rates = {}
-    current_date = start_date
+    current_date = start_date + timedelta(days=1)  # начинаем со следующего дня после последней известной даты
     while current_date <= end_date:
         rate = get_currency_rate(current_date)
         if rate is not None:
             usd_rates[current_date.strftime("%d/%m/%Y")] = rate
         current_date += timedelta(days=1)
     
-    usd = pd.DataFrame(list(usd_rates.items()), columns=['begin', 'usdt'])
-    usd['begin'] = pd.to_datetime(usd['begin'],format='%d/%m/%Y')
-    usdtt['begin'] = pd.to_datetime(usdtt['begin'],format='%Y-%m-%dT%H:%M:%S.%f')
-    usd = pd.merge(usd, usdtt, on='begin', how='outer')
-    usd['usdt'] = usd['usdt_x'].combine_first(usd['usdt_y'])
-    usd = usd.drop(columns=['usdt_x', 'usdt_y'])
+    # Если получили новые курсы, добавляем их
+    if usd_rates:
+        usd_new = pd.DataFrame(list(usd_rates.items()), columns=['begin', 'usdt'])
+        usd_new['begin'] = pd.to_datetime(usd_new['begin'], format='%d/%m/%Y')
+        
+        # Объединяем старые и новые данные
+        if not usdtt.empty and 'begin' in usdtt.columns:
+            usdtt['begin'] = pd.to_datetime(usdtt['begin'])
+            usd = pd.concat([usdtt, usd_new], ignore_index=True).drop_duplicates(subset='begin', keep='last')
+        else:
+            usd = usd_new
+        
+        # Сохраняем обновленные данные
+        with open(file_pa, 'w') as f:
+            json.dump(usd.to_json(date_format='iso', orient='records'), f)
+    else:
+        usd = usdtt
     
-    # === ИЗМЕНЕНИЕ №2: НЕ СОХРАНЯЕМ USD НА DISK В GITHUB ===
-    # УДАЛЕНО: with open(file_pa, 'w') as f: json.dump(usd.to_json(date_format='iso'), f)
+    # Убедимся, что begin в datetime
+    if 'begin' in usd.columns:
+        usd['begin'] = pd.to_datetime(usd['begin'])
+    else:
+        # Если что-то пошло не так, создаем пустой DataFrame с колонкой begin
+        usd = pd.DataFrame(columns=['begin', 'usdt'])
     
     data_framest = {}
     
@@ -307,9 +357,6 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         'n_estimators': [250, 200]
     }
     
-    # === ИЗМЕНЕНИЕ №3: НЕ ИСПОЛЬЗУЕМ ПАПКУ MODELS В GITHUB ===
-    # УДАЛЕНО: if not os.path.exists('models'): os.makedirs('models')
-    
     models = {}
     
     for sector, secd in data_frames.items():
@@ -319,8 +366,6 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             X = secd[ticker].drop(columns=['target']).iloc[:-(1+forecast_days)]
             y = secd[ticker]['target'].iloc[:-(1+forecast_days)]
             
-            # === ИЗМЕНЕНИЕ №4: ВСЕГДА ЗАПУСКАЕМ GRIDSEARCH В GITHUB ===
-            # В GITHUB НЕТ ДОСТУПА К GOOGLE DRIVE, ПОЭТОМУ ВСЕГДА ОБУЧАЕМ С НУЛЯ
             model = LGBMRegressor(random_state=1)
             grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4)
             grid_search.fit(X, y)
@@ -382,7 +427,6 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         }
     }
     
-    # === ИЗМЕНЕНИЕ №5: НЕ СОХРАНЯЕМ НА GOOGLE DRIVE ВНУТРИ ФУНКЦИИ ===
     print("✅ Анализ завершен")
     
     return results_data
@@ -396,13 +440,14 @@ def main():
     # Проверяем наличие файла usd_data.json
     if not os.path.exists('usd_data.json'):
         print("❌ Файл usd_data.json не найден!")
-        print("📋 Решение:")
-        print("   1. Запустите анализ в Colab")
-        print("   2. Скачайте usd_github_backup.json")
-        print("   3. Загрузите в репозиторий как usd_data.json")
-        sys.exit(1)
+        print("📋 Создаю новый файл с начальными данными...")
+        
+        # Создаем пустой файл с заголовками
+        initial_data = pd.DataFrame(columns=['begin', 'usdt'])
+        with open('usd_data.json', 'w') as f:
+            json.dump(initial_data.to_json(date_format='iso', orient='records'), f)
     
-    print("✅ Файл usd_data.json найден")
+    print("✅ Файл usd_data.json найден или создан")
     
     try:
         print("🔧 Запускаю полный анализ...")
