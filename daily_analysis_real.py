@@ -156,53 +156,71 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             result['begin'] = pd.to_datetime(result['begin'])
             result=result[['begin', 'close','volume','value']].rename(columns={'close': ticker,'volume':f'vol{ticker}','value': f'val{ticker}'})
             sector_data.append(result)
+        
+        # Объединяем все акции сектора
         combined_frame = sector_data[0]
         for df in sector_data[1:]:
             combined_frame = combined_frame.merge(df, on='begin', how='inner')
+        
         combined_frame.dropna(inplace=True)
         combined_frame = add_cap_columns(combined_frame, cap[sector])
         
-        # СОХРАНЯЕМ ДАТЫ ДО ОЧИСТКИ
-        dates_before = combined_frame['begin'].copy()
+        # Сохраняем даты ДО установки индекса
+        r = combined_frame['begin']
         
+        # Устанавливаем индекс и делаем копию для предсказаний
         combined_frame.set_index('begin', inplace=True)
         combined_frame.dropna(inplace=True)
-        ccomb=combined_frame.copy()
+        ccomb = combined_frame.copy()  # Копия без индекса сектора
         
+        # Загружаем реальные данные индекса сектора
         j = requests.get(f'http://iss.moex.com/iss/engines/stock/markets/index/securities/{sector}/candles.json?from={startpars}&till=2024-09-25&interval=24').json()
         jo = requests.get(f'http://iss.moex.com/iss/engines/stock/markets/index/securities/{sector}/candles.json?from=2024-09-25&till={today}&interval=24').json()
         dataj = [{k: r[i] for i, k in enumerate(j['candles']['columns'])} for r in j['candles']['data']]
         datajo = [{k: r[i] for i, k in enumerate(jo['candles']['columns'])} for r in jo['candles']['data']]
         framej = pd.DataFrame(dataj)
         framejo = pd.DataFrame(datajo)
-        sec = pd.concat([framej, framejo], ignore_index=True)
-        sec['begin'] = pd.to_datetime(sec['begin'])
-        sec=sec[['begin', 'close']].rename(columns={'close': 'sector'})
+        sec_real = pd.concat([framej, framejo], ignore_index=True)
+        sec_real['begin'] = pd.to_datetime(sec_real['begin'])
+        sec_real = sec_real[['begin', 'close']].rename(columns={'close': 'sector'})
         
-        # Объединяем с combined_frame (который сейчас имеет индекс 'begin')
-        combined_frame_with_index = combined_frame.copy()
-        combined_frame_with_index = combined_frame_with_index.reset_index()
-        combined_frame = pd.merge(combined_frame_with_index, sec, on='begin', how='inner')
-        combined_frame.set_index('begin', inplace=True)
-        combined_frame.dropna(inplace=True)
+        # Сбрасываем индекс combined_frame для слияния с реальным индексом
+        combined_frame_for_merge = combined_frame.reset_index()
         
-        # УБЕДИТЕСЬ, ЧТО ccomb ИМЕЕТ ТЕ ЖЕ ДАТЫ, ЧТО И combined_frame
-        # Перестраиваем ccomb на основе текущего combined_frame
-        ccomb = combined_frame.copy()
+        # Сливаем с реальным индексом сектора (только для обучения)
+        combined_frame_with_real_sec = pd.merge(combined_frame_for_merge, sec_real, on='begin', how='inner')
+        combined_frame_with_real_sec.set_index('begin', inplace=True)
+        combined_frame_with_real_sec.dropna(inplace=True)
         
-        X=combined_frame.drop(columns=['sector'])
-        y=combined_frame['sector']
-        model=LGBMRegressor(random_state=1,verbose=-1)
-        model.fit(X,y)
+        # Обучаем модель на реальных данных индекса
+        X = combined_frame_with_real_sec.drop(columns=['sector'])
+        y = combined_frame_with_real_sec['sector']
+        model = LGBMRegressor(random_state=1, verbose=-1)
+        model.fit(X, y)
         
-        # Используем те же данные для предсказания
-        pred=model.predict(ccomb.drop(columns=['sector']))
+        # Важно: предсказываем на ccomb (который содержит все данные, включая те, для которых нет реального индекса)
+        # Но нам нужно предсказать только для тех дат, которые есть в ccomb и которые использовались для обучения
+        # Для этого мы должны убедиться, что ccomb имеет те же колонки, что и X
+        common_columns = [col for col in X.columns if col in ccomb.columns]
         
-        # Используем даты из индекса ccomb
-        sec=pd.DataFrame()
-        sec['begin'] = ccomb.index
-        sec['sector']=pred
-        ind[sector]=sec
+        if len(common_columns) == len(X.columns):
+            # Все колонки присутствуют, можем предсказывать
+            pred = model.predict(ccomb[common_columns])
+            
+            # Создаем DataFrame с предсказаниями
+            sec_pred = pd.DataFrame()
+            sec_pred['begin'] = ccomb.index
+            sec_pred['sector'] = pred
+        else:
+            # Если колонки не совпадают, предсказываем только для дат из обучающей выборки
+            print(f"⚠️ Колонки не совпадают для сектора {sector}")
+            # Предсказываем на обучающих данных
+            pred = model.predict(X)
+            sec_pred = pd.DataFrame()
+            sec_pred['begin'] = X.index
+            sec_pred['sector'] = pred
+        
+        ind[sector] = sec_pred
         ind[sector] = ind[sector].drop_duplicates(subset='begin', keep='first')
     
     j = requests.get(f'http://iss.moex.com/iss/engines/futures/markets/forts/securities/BRU5/candles.json?from={startpars}&till=2024-09-25&interval=24').json()
