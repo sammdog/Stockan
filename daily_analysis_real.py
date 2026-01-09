@@ -343,7 +343,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         for ticker in tickers:
             j = requests.get(f'http://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json?from={startpars}&till=2024-09-25&interval=24').json()
             jo = requests.get(f'http://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json?from=2024-09-25&till={today}&interval=24').json()
-            dataj = [{k: r[i] for i, k in enumerate(j['candles']['columns'])} for r in j['candles['data']]
+            dataj = [{k: r[i] for i, k in enumerate(j['candles']['columns'])} for r in j['candles']['data']]
             datajo = [{k: r[i] for i, k in enumerate(jo['candles']['columns'])} for r in jo['candles']['data']]
             framej = pd.DataFrame(dataj)
             framejo = pd.DataFrame(datajo)
