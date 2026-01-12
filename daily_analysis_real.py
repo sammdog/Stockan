@@ -475,31 +475,29 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             
             df = df[['begin', 'close', 'volume']].rename(columns={'close': 'ticker'})
             
-            # Объединяем с индексами
+            df = pd.merge(df, ind[sector], on='begin', how='left')
             if sector in ind and not ind[sector].empty:
-                df = pd.merge(df, ind[sector], on='begin', how='inner')
+                df = pd.merge(df, ind[sector], on='begin', how='left')
             else:
-                debug_print(f"  ⚠️ Нет предсказаний индекса для {sector}, пропускаю {ticker}")
-                continue
+                df['sector'] = 0  # Заполняем значением по умолчанию
             
             if 'IMOEX2' in ind and not ind['IMOEX2'].empty:
-                df = pd.merge(df, ind['IMOEX2'], on='begin', how='inner')
+                df = pd.merge(df, ind['IMOEX2'], on='begin', how='left', suffixes=('', '_imoex'))
             else:
-                debug_print(f"  ⚠️ Нет предсказаний IMOEX2, пропускаю {ticker}")
-                continue
+                df['sector_imoex'] = 0
             
-            # Объединяем с USD и Brent
             if not usd.empty:
-                df = pd.merge(df, usd, on='begin', how='inner')
+                df = pd.merge(df, usd, on='begin', how='left')
             else:
-                debug_print(f"  ⚠️ Нет данных USD, пропускаю {ticker}")
-                continue
+                df['usdt'] = 0
             
             if not bre.empty:
-                df = pd.merge(df, bre, on='begin', how='inner')
+                df = pd.merge(df, bre, on='begin', how='left')
             else:
-                debug_print(f"  ⚠️ Нет данных Brent, пропускаю {ticker}")
-                continue
+                df['brent'] = 0
+            
+            # Заполняем NaN значениями
+            df = df.fillna(method='ffill').fillna(method='bfill')
             
             df.set_index('begin', inplace=True)
             df.dropna(inplace=True)
