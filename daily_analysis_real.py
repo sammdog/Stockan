@@ -523,51 +523,51 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         data_framest[sector] = sector_data
     
     debug_print(f"✅ Обработаны данные по {sum(len(v) for v in data_framest.values())} акциям")
-
-for sector in data_framest:
-    for ticker in data_framest[sector]:
-        if not data_framest[sector][ticker].empty:
-            last_date = data_framest[sector][ticker].index[-1].date()
-            debug_print(f"  📅 {ticker}: последняя дата данных: {last_date}")
-            break  # Чтобы не выводить все
-    break
-# ========== СОЗДАНИЕ ЦЕЛЕВОЙ ПЕРЕМЕННОЙ ==========
-debug_print("🎯 Создаю целевую переменную...")
-sppa = []
-spv = {}
-smpe = 0
-data_frames = {}
-
-for sector, tickers in sectors.items():
-    sector_data = {}
-    for ticker in tickers:
-        if ticker in data_framest.get(sector, {}):
-            result = data_framest[sector][ticker].copy()
-            result['target'] = 0.0
-            
-            # ИСПРАВЛЕНИЕ: Правильно рассчитываем цель для каждой строки
-            for i in range(len(result)):
-                if i + forecast_days < len(result):
-                    current_close = result.iloc[i]['ticker']
-                    # Ищем максимум в ближайшие forecast_days дней
-                    future_start = i + 1
-                    future_end = min(i + 1 + forecast_days, len(result))
-                    
-                    if future_start < future_end:
-                        future_prices = result.iloc[future_start:future_end]['ticker']
-                        if len(future_prices) > 0:
-                            max_future = future_prices.max()
-                            result.at[result.index[i], 'target'] = (max_future - current_close) * 100 / current_close
-            
-            # Сохраняем ВСЕ данные, включая последние дни (даже с target=0)
-            # Они понадобятся для предсказания
-            sector_data[ticker] = result
-            
-            # Отладочная информация
-            last_date = result.index[-1].date() if len(result) > 0 else "нет данных"
-            debug_print(f"  📊 {ticker}: {len(result)} строк, последняя дата: {last_date}")
     
-    data_frames[sector] = sector_data
+    for sector in data_framest:
+        for ticker in data_framest[sector]:
+            if not data_framest[sector][ticker].empty:
+                last_date = data_framest[sector][ticker].index[-1].date()
+                debug_print(f"  📅 {ticker}: последняя дата данных: {last_date}")
+                break  # Чтобы не выводить все
+        break
+    # ========== СОЗДАНИЕ ЦЕЛЕВОЙ ПЕРЕМЕННОЙ ==========
+    debug_print("🎯 Создаю целевую переменную...")
+    sppa = []
+    spv = {}
+    smpe = 0
+    data_frames = {}
+    
+    for sector, tickers in sectors.items():
+        sector_data = {}
+        for ticker in tickers:
+            if ticker in data_framest.get(sector, {}):
+                result = data_framest[sector][ticker].copy()
+                result['target'] = 0.0
+                
+                # ИСПРАВЛЕНИЕ: Правильно рассчитываем цель для каждой строки
+                for i in range(len(result)):
+                    if i + forecast_days < len(result):
+                        current_close = result.iloc[i]['ticker']
+                        # Ищем максимум в ближайшие forecast_days дней
+                        future_start = i + 1
+                        future_end = min(i + 1 + forecast_days, len(result))
+                        
+                        if future_start < future_end:
+                            future_prices = result.iloc[future_start:future_end]['ticker']
+                            if len(future_prices) > 0:
+                                max_future = future_prices.max()
+                                result.at[result.index[i], 'target'] = (max_future - current_close) * 100 / current_close
+                
+                # Сохраняем ВСЕ данные, включая последние дни (даже с target=0)
+                # Они понадобятся для предсказания
+                sector_data[ticker] = result
+                
+                # Отладочная информация
+                last_date = result.index[-1].date() if len(result) > 0 else "нет данных"
+                debug_print(f"  📊 {ticker}: {len(result)} строк, последняя дата: {last_date}")
+        
+        data_frames[sector] = sector_data
     
     # ========== ОБУЧЕНИЕ МОДЕЛЕЙ ==========
     debug_print("🤖 Обучаю модели...")
@@ -613,68 +613,68 @@ for sector, tickers in sectors.items():
                 
                 models[sector][ticker] = model
     
-# ========== ПРЕДСКАЗАНИЯ ==========
-debug_print("🔮 Делаю предсказания...")
-predictions = {}
-
-for sector, secd in data_frames.items():
-    for ticker in sectors[sector]:
-        if ticker in secd and ticker in models.get(sector, {}):
-            # ИСПРАВЛЕНИЕ: Берем последние данные из data_framest, а не из secd
-            if sector in data_framest and ticker in data_framest[sector]:
-                # Берем последнюю строку из исходных данных (самые свежие)
-                last_data = data_framest[sector][ticker].iloc[-1:].copy()
-                
-                # Убедимся, что у нас те же признаки, что при обучении
-                # Добавляем временные фичи для последней строки
-                X_cols = models[sector][ticker].feature_names_in_
-                
-                # Если в last_data нет всех нужных колонок, создаем их
-                for col in X_cols:
-                    if col not in last_data.columns and col != 'target':
-                        # Пытаемся создать недостающие фичи
-                        if '_lag_' in col:
-                            base_col = col.split('_lag_')[0]
-                            lag = int(col.split('_lag_')[1])
-                            # Для лагов нужно взять значения из предыдущих строк
-                            if len(data_framest[sector][ticker]) > lag:
-                                last_data[col] = data_framest[sector][ticker][base_col].iloc[-lag-1]
-                            else:
-                                last_data[col] = np.nan
-                        elif '_rolling5' in col:
-                            base_col = col.replace('_rolling5', '')
-                            if len(data_framest[sector][ticker]) >= 5:
-                                last_data[col] = data_framest[sector][ticker][base_col].iloc[-5:].mean()
-                            else:
-                                last_data[col] = np.nan
-                
-                # Заполняем NaN средними значениями
-                last_data = last_data.fillna(method='ffill').fillna(method='bfill')
-                
-                # Отладочная информация
-                debug_print(f"  📈 {ticker}: предсказание для {last_data.index[-1].date()}")
-                
-                try:
-                    prediction = models[sector][ticker].predict(last_data[X_cols])
-                    predictions[ticker] = float(prediction[0])
-                except Exception as e:
-                    debug_print(f"  ⚠️ Ошибка предсказания {ticker}: {e}")
-                    # Пробуем альтернативный способ
+    # ========== ПРЕДСКАЗАНИЯ ==========
+    debug_print("🔮 Делаю предсказания...")
+    predictions = {}
+    
+    for sector, secd in data_frames.items():
+        for ticker in sectors[sector]:
+            if ticker in secd and ticker in models.get(sector, {}):
+                # ИСПРАВЛЕНИЕ: Берем последние данные из data_framest, а не из secd
+                if sector in data_framest and ticker in data_framest[sector]:
+                    # Берем последнюю строку из исходных данных (самые свежие)
+                    last_data = data_framest[sector][ticker].iloc[-1:].copy()
+                    
+                    # Убедимся, что у нас те же признаки, что при обучении
+                    # Добавляем временные фичи для последней строки
+                    X_cols = models[sector][ticker].feature_names_in_
+                    
+                    # Если в last_data нет всех нужных колонок, создаем их
+                    for col in X_cols:
+                        if col not in last_data.columns and col != 'target':
+                            # Пытаемся создать недостающие фичи
+                            if '_lag_' in col:
+                                base_col = col.split('_lag_')[0]
+                                lag = int(col.split('_lag_')[1])
+                                # Для лагов нужно взять значения из предыдущих строк
+                                if len(data_framest[sector][ticker]) > lag:
+                                    last_data[col] = data_framest[sector][ticker][base_col].iloc[-lag-1]
+                                else:
+                                    last_data[col] = np.nan
+                            elif '_rolling5' in col:
+                                base_col = col.replace('_rolling5', '')
+                                if len(data_framest[sector][ticker]) >= 5:
+                                    last_data[col] = data_framest[sector][ticker][base_col].iloc[-5:].mean()
+                                else:
+                                    last_data[col] = np.nan
+                    
+                    # Заполняем NaN средними значениями
+                    last_data = last_data.fillna(method='ffill').fillna(method='bfill')
+                    
+                    # Отладочная информация
+                    debug_print(f"  📈 {ticker}: предсказание для {last_data.index[-1].date()}")
+                    
                     try:
-                        last_data_simple = secd[ticker].drop(columns=['target']).iloc[-1:].copy()
-                        prediction = models[sector][ticker].predict(last_data_simple)
+                        prediction = models[sector][ticker].predict(last_data[X_cols])
+                        predictions[ticker] = float(prediction[0])
+                    except Exception as e:
+                        debug_print(f"  ⚠️ Ошибка предсказания {ticker}: {e}")
+                        # Пробуем альтернативный способ
+                        try:
+                            last_data_simple = secd[ticker].drop(columns=['target']).iloc[-1:].copy()
+                            prediction = models[sector][ticker].predict(last_data_simple)
+                            predictions[ticker] = float(prediction[0])
+                        except:
+                            predictions[ticker] = 0.0
+                else:
+                    # Запасной вариант
+                    try:
+                        last_data = secd[ticker].drop(columns=['target']).iloc[-1:].copy()
+                        prediction = models[sector][ticker].predict(last_data)
                         predictions[ticker] = float(prediction[0])
                     except:
                         predictions[ticker] = 0.0
-            else:
-                # Запасной вариант
-                try:
-                    last_data = secd[ticker].drop(columns=['target']).iloc[-1:].copy()
-                    prediction = models[sector][ticker].predict(last_data)
-                    predictions[ticker] = float(prediction[0])
-                except:
-                    predictions[ticker] = 0.0
-    
+        
     # ========== КЛАССИФИКАЦИЯ РЕЗУЛЬТАТОВ ==========
     sr, mn = {}, {}
     for ticker, pr in predictions.items():
