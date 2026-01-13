@@ -1,6 +1,6 @@
 """
 ПОЛНЫЙ АНАЛИЗ АКЦИЙ ДЛЯ GITHUB ACTIONS
-Адаптированная версия из Google Colab с пагинацией
+Адаптированная версия из Google Colab с пагинацией и исправленной загрузкой Brent
 """
 import os
 import sys
@@ -148,8 +148,10 @@ def fetch_futures_data_paginated(ticker, start_date, end_date, max_days=400):
     if all_data:
         result = pd.concat(all_data, ignore_index=True)
         result = result.sort_values('begin').drop_duplicates('begin')
+        debug_print(f"  📊 Итого по {ticker}: {len(result)} строк, от {result['begin'].min().date() if not result.empty else 'нет'} до {result['begin'].max().date() if not result.empty else 'нет'}")
         return result
     else:
+        debug_print(f"  ❌ Нет данных по {ticker}")
         return pd.DataFrame()
 
 # ========== ФУНКЦИЯ ДОБАВЛЕНИЯ КАПИТАЛИЗАЦИЙ ==========
@@ -164,6 +166,74 @@ def add_cap_columns(df, cap_dict):
             2026: values[3]
         })
     return df
+
+# ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ ДАННЫХ BRENT ИЗ НЕСКОЛЬКИХ КОНТРАКТОВ ==========
+def fetch_brent_data_multiple_contracts(start_date, end_date):
+    """Загружает данные Brent из нескольких контрактов для покрытия всего периода"""
+    debug_print("🛢️ Загружаю данные по Brent из нескольких контрактов...")
+    
+    # Определяем актуальные контракты на Brent за последние годы
+    # Формат: BR{месяц}{год} где месяц: F=янв, G=фев, H=мар, J=апр, K=май, M=июн, 
+    # N=июл, Q=авг, U=сен, V=окт, X=ноя, Z=дек
+    
+    # Список контрактов, которые могут покрыть период с 2023-05-29 по сегодня
+    # Актуальные контракты для разных периодов:
+    brent_contracts = [
+        # 2026 год
+        'BRJ6',  # Апрель 2026 (актуальный сейчас)
+        'BRF6',  # Январь 2026
+        # 2025 год
+        'BRZ5',  # Декабрь 2025
+        'BRU5',  # Сентябрь 2025 (ранее активный)
+        'BRQ5',  # Август 2025
+        'BRN5',  # Июль 2025
+        'BRM5',  # Июнь 2025
+        'BRK5',  # Май 2025
+        'BRJ5',  # Апрель 2025
+        'BRH5',  # Март 2025
+        'BRG5',  # Февраль 2025
+        'BRF5',  # Январь 2025
+        # 2024 год
+        'BRZ4',  # Декабрь 2024
+        'BRU4',  # Сентябрь 2024
+        'BRQ4',  # Август 2024
+        'BRN4',  # Июль 2024
+        'BRM4',  # Июнь 2024
+        # 2023 год
+        'BRU3',  # Сентябрь 2023
+        'BRQ3',  # Август 2023
+        'BRN3',  # Июль 2023
+        'BRM3',  # Июнь 2023
+    ]
+    
+    all_brent_data = []
+    
+    for contract in brent_contracts:
+        debug_print(f"  🔄 Пробую контракт {contract}...")
+        df = fetch_futures_data_paginated(contract, start_date, end_date)
+        
+        if not df.empty:
+            df = df[['begin', 'close']].rename(columns={'close': 'brent'})
+            all_brent_data.append(df)
+            debug_print(f"    ✅ Добавлено {len(df)} строк из {contract}")
+        else:
+            debug_print(f"    ⚠️ Нет данных по контракту {contract}")
+    
+    if all_brent_data:
+        # Объединяем все данные
+        bre = pd.concat(all_brent_data, ignore_index=True)
+        
+        # Удаляем дубликаты по дате, оставляя последнее значение (более новые контракты имеют приоритет)
+        bre = bre.sort_values('begin')
+        bre = bre.drop_duplicates(subset='begin', keep='last')
+        
+        debug_print(f"📊 Всего данных Brent: {len(bre)} строк")
+        debug_print(f"📅 Диапазон данных Brent: {bre['begin'].min().date()} - {bre['begin'].max().date()}")
+        
+        return bre
+    else:
+        debug_print("❌ Не удалось загрузить данные по Brent ни из одного контракта")
+        return pd.DataFrame(columns=['begin', 'brent'])
 
 # ========== ОСНОВНОЙ КОД ==========
 def main_pipeline(forecast_days=14, output_mode="json"):
@@ -374,14 +444,13 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         ind[sector] = sec_pred.drop_duplicates(subset='begin', keep='first')
         debug_print(f"  ✅ Сектор {sector}: {len(ind[sector])} предсказаний, последняя дата: {ind[sector]['begin'].iloc[-1].date()}")
     
-    # ========== ЗАГРУЗКА ДАННЫХ БРЕНТ ==========
-    debug_print("🛢️ Загружаю данные по Brent...")
-    bre = fetch_futures_data_paginated('BRU5', startpars, today.strftime('%Y-%m-%d'))
+    # ========== ЗАГРУЗКА ДАННЫХ BRENT ==========
+    bre = fetch_brent_data_multiple_contracts(startpars, today.strftime('%Y-%m-%d'))
+    
     if bre.empty:
         debug_print("⚠️ Не удалось загрузить данные Brent, создаю пустой DataFrame")
-        bre = pd.DataFrame(columns=['begin', 'close'])
+        bre = pd.DataFrame(columns=['begin', 'brent'])
     else:
-        bre = bre[['begin', 'close']].rename(columns={'close': 'brent'})
         debug_print(f"✅ Данные Brent загружены: {len(bre)} строк, последняя дата: {bre['begin'].max().date()}")
     
     # ========== ЗАГРУЗКА И ОБНОВЛЕНИЕ USD ДАННЫХ ==========
@@ -683,6 +752,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         'predictions_count': len(predictions),
         'usd_data_last_date': str(usd['begin'].max()) if not usd.empty else "нет данных",
         'brent_data_last_date': str(bre['begin'].max()) if not bre.empty else "нет данных",
+        'brent_data_range': f"{bre['begin'].min().date() if not bre.empty else 'нет'} - {bre['begin'].max().date() if not bre.empty else 'нет'}",
         'results_summary': results_data['summary'],
         'avg_mae': avg_mae,
         'model_accuracy': accuracy
