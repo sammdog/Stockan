@@ -1,6 +1,7 @@
 """
 ПОЛНЫЙ АНАЛИЗ АКЦИЙ ДЛЯ GITHUB ACTIONS
-Максимально приближен к коду Google Colab
+Адаптированная версия из Google Colab с оптимизированной загрузкой Brent
+и сохранением параметров моделей
 """
 import os
 import sys
@@ -12,6 +13,7 @@ from datetime import datetime, date, timedelta
 import lightgbm
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import GridSearchCV, cross_val_score
+import joblib
 import warnings
 import xml.etree.ElementTree as ET
 import time
@@ -28,56 +30,134 @@ def debug_print(message):
     """Вывод отладочной информации"""
     print(f"🔍 [DEBUG] {message}")
 
-# ========== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ ==========
-def fetch_data_two_parts(ticker, start_date, end_date, split_date='2024-09-25', is_index=False):
-    """Загружает данные двумя запросами как в Google Colab"""
-    try:
-        # Первый запрос
-        if is_index:
-            url1 = f"http://iss.moex.com/iss/engines/stock/markets/index/securities/{ticker}/candles.json?from={start_date}&till={split_date}&interval=24"
-        else:
-            url1 = f"http://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json?from={start_date}&till={split_date}&interval=24"
+def save_debug_data(data, filename):
+    """Сохранение отладочных данных"""
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=2, default=str)
+    debug_print(f"Сохранены отладочные данные в {filename}")
+
+# ========== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ MOEX ==========
+def fetch_moex_data_paginated(ticker, start_date, end_date, is_index=False, max_days=500):
+    """
+    Загружает данные MOEX с разбивкой на части
+    MOEX API ограничивает 500 строк за запрос
+    """
+    all_data = []
+    current_start = pd.to_datetime(start_date)
+    current_end = pd.to_datetime(end_date)
+    
+    # Определяем тип запроса
+    if is_index:
+        url_template = "http://iss.moex.com/iss/engines/stock/markets/index/securities/{ticker}/candles.json?from={start}&till={end}&interval=24"
+    else:
+        url_template = "http://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json?from={start}&till={end}&interval=24"
+    
+    attempts = 0
+    max_attempts = 3
+    
+    while current_start < current_end:
+        part_end = min(current_start + timedelta(days=max_days), current_end)
         
-        # Второй запрос
-        if is_index:
-            url2 = f"http://iss.moex.com/iss/engines/stock/markets/index/securities/{ticker}/candles.json?from={split_date}&till={end_date}&interval=24"
-        else:
-            url2 = f"http://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json?from={split_date}&till={end_date}&interval=24"
+        url = url_template.format(
+            ticker=ticker,
+            start=current_start.strftime('%Y-%m-%d'),
+            end=part_end.strftime('%Y-%m-%d')
+        )
         
-        debug_print(f"  📥 Загрузка {ticker}: {start_date} - {split_date}")
-        response1 = requests.get(url1, timeout=30)
+        debug_print(f"  📥 Загрузка {ticker}: {current_start.date()} - {part_end.date()}")
         
-        debug_print(f"  📥 Загрузка {ticker}: {split_date} - {end_date}")
-        response2 = requests.get(url2, timeout=30)
-        
-        all_data = []
-        
-        for response in [response1, response2]:
-            if response.status_code == 200:
-                data = response.json()
-                if 'candles' in data and 'data' in data['candles'] and data['candles']['data']:
-                    part_data = [{k: r[i] for i, k in enumerate(data['candles']['columns'])} 
-                               for r in data['candles']['data']]
-                    df_part = pd.DataFrame(part_data)
-                    all_data.append(df_part)
-                    debug_print(f"    ✅ Загружено {len(df_part)} строк")
+        success = False
+        for attempt in range(max_attempts):
+            try:
+                response = requests.get(url, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'candles' in data and 'data' in data['candles'] and data['candles']['data']:
+                        part_data = [{k: r[i] for i, k in enumerate(data['candles']['columns'])} 
+                                   for r in data['candles']['data']]
+                        df_part = pd.DataFrame(part_data)
+                        df_part['begin'] = pd.to_datetime(df_part['begin'])
+                        all_data.append(df_part)
+                        debug_print(f"    ✅ Загружено {len(df_part)} строк")
+                        success = True
+                        break
+                    else:
+                        debug_print(f"    ⚠️ Нет данных (попытка {attempt+1})")
                 else:
-                    debug_print(f"    ⚠️ Нет данных в части запроса")
-            else:
-                debug_print(f"    ⚠️ Ошибка HTTP {response.status_code}")
-        
-        if all_data:
-            result = pd.concat(all_data, ignore_index=True)
-            result['begin'] = pd.to_datetime(result['begin'])
-            result = result.sort_values('begin').drop_duplicates('begin')
-            debug_print(f"  📊 Итого по {ticker}: {len(result)} строк")
-            return result
-        else:
-            debug_print(f"  ❌ Нет данных по {ticker}")
-            return pd.DataFrame()
+                    debug_print(f"    ⚠️ Ошибка HTTP {response.status_code} (попытка {attempt+1})")
+            except Exception as e:
+                debug_print(f"    ⚠️ Ошибка запроса: {e} (попытка {attempt+1})")
             
-    except Exception as e:
-        debug_print(f"  ❌ Ошибка при загрузке {ticker}: {e}")
+            if attempt < max_attempts - 1:
+                time.sleep(1)
+        
+        if not success:
+            debug_print(f"    ❌ Не удалось загрузить данные за период {current_start.date()} - {part_end.date()}")
+        
+        current_start = part_end + timedelta(days=1)
+    
+    if all_data:
+        result = pd.concat(all_data, ignore_index=True)
+        result = result.sort_values('begin').drop_duplicates('begin')
+        debug_print(f"  📊 Итого по {ticker}: {len(result)} строк, последняя дата: {result['begin'].max().date() if not result.empty else 'нет'}")
+        return result
+    else:
+        debug_print(f"  ❌ Нет данных по {ticker}")
+        return pd.DataFrame()
+
+def fetch_futures_data_paginated(ticker, start_date, end_date, max_days=500):
+    """Загружает данные фьючерсов с разбивкой на части"""
+    all_data = []
+    current_start = pd.to_datetime(start_date)
+    current_end = pd.to_datetime(end_date)
+    
+    attempts = 0
+    max_attempts = 3
+    
+    while current_start < current_end:
+        part_end = min(current_start + timedelta(days=max_days), current_end)
+        
+        url = f"http://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}/candles.json?from={current_start.strftime('%Y-%m-%d')}&till={part_end.strftime('%Y-%m-%d')}&interval=24"
+        
+        debug_print(f"  📥 Загрузка {ticker}: {current_start.date()} - {part_end.date()}")
+        
+        success = False
+        for attempt in range(max_attempts):
+            try:
+                response = requests.get(url, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'candles' in data and 'data' in data['candles'] and data['candles']['data']:
+                        part_data = [{k: r[i] for i, k in enumerate(data['candles']['columns'])} 
+                                   for r in data['candles']['data']]
+                        df_part = pd.DataFrame(part_data)
+                        df_part['begin'] = pd.to_datetime(df_part['begin'])
+                        all_data.append(df_part)
+                        debug_print(f"    ✅ Загружено {len(df_part)} строк")
+                        success = True
+                        break
+                    else:
+                        debug_print(f"    ⚠️ Нет данных (попытка {attempt+1})")
+                else:
+                    debug_print(f"    ⚠️ Ошибка HTTP {response.status_code} (попытка {attempt+1})")
+            except Exception as e:
+                debug_print(f"    ⚠️ Ошибка запроса: {e} (попытка {attempt+1})")
+            
+            if attempt < max_attempts - 1:
+                time.sleep(1)
+        
+        if not success:
+            debug_print(f"    ❌ Не удалось загрузить данные за период {current_start.date()} - {part_end.date()}")
+        
+        current_start = part_end + timedelta(days=1)
+    
+    if all_data:
+        result = pd.concat(all_data, ignore_index=True)
+        result = result.sort_values('begin').drop_duplicates('begin')
+        debug_print(f"  📊 Итого по {ticker}: {len(result)} строк, от {result['begin'].min().date() if not result.empty else 'нет'} до {result['begin'].max().date() if not result.empty else 'нет'}")
+        return result
+    else:
+        debug_print(f"  ❌ Нет данных по {ticker}")
         return pd.DataFrame()
 
 # ========== ФУНКЦИЯ ДОБАВЛЕНИЯ КАПИТАЛИЗАЦИЙ ==========
@@ -110,11 +190,72 @@ def get_currency_rate(date):
         debug_print(f"Ошибка при запросе курса на {date.strftime('%d/%m/%Y')}: {e}")
     return None
 
+# ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ BRENT ==========
+def fetch_brent_data_optimized(start_date, end_date):
+    """Загружает данные Brent из минимального набора контрактов (4 контракта)"""
+    debug_print("🛢️ Загружаю данные по Brent из минимального набора контрактов...")
+    
+    # Определяем нужные контракты на каждый год с 2023 по 2026
+    brent_contracts = ['BRU3', 'BRU4', 'BRU5', 'BRJ6']
+    
+    bre_all = []
+    loaded_contracts = []
+    
+    for contract in brent_contracts:
+        debug_print(f"  🔄 Загружаю контракт {contract}...")
+        
+        try:
+            # Используем пагинацию для каждого контракта
+            df = fetch_futures_data_paginated(contract, start_date, end_date)
+            
+            if not df.empty:
+                df = df[['begin', 'close']].rename(columns={'close': 'brent'})
+                bre_all.append(df)
+                loaded_contracts.append(contract)
+                debug_print(f"    ✅ Загружено {len(df)} строк")
+                
+                # Логируем диапазон дат для этого контракта
+                if not df.empty:
+                    debug_print(f"    📅 {contract}: {df['begin'].min().date()} - {df['begin'].max().date()}")
+            else:
+                debug_print(f"    ⚠️ Нет данных по контракту {contract}")
+        except Exception as e:
+            debug_print(f"    ❌ Ошибка загрузки {contract}: {e}")
+    
+    # Объединяем все данные
+    if bre_all:
+        bre = pd.concat(bre_all, ignore_index=True)
+        bre = bre[['begin', 'brent']]
+        
+        # Сортируем по дате и удаляем дубликаты
+        bre = bre.sort_values('begin').drop_duplicates(subset='begin', keep='last')
+        
+        # Выводим информацию о диапазоне дат
+        if not bre.empty:
+            debug_print(f"📊 Всего данных Brent: {len(bre)} строк")
+            debug_print(f"📅 Диапазон данных Brent: {bre['begin'].min().date()} - {bre['begin'].max().date()}")
+            
+            # Проверяем наличие пропусков
+            date_range = pd.date_range(start=bre['begin'].min(), end=bre['begin'].max())
+            missing_dates = [d for d in date_range if d not in bre['begin'].values]
+            if missing_dates:
+                debug_print(f"⚠️ Обнаружены пропуски в данных Brent: {len(missing_dates)} дней")
+        else:
+            debug_print("⚠️ Данные Brent пусты после объединения")
+            bre = pd.DataFrame(columns=['begin', 'brent'])
+        
+        debug_print(f"✅ Успешно загружены контракты: {', '.join(loaded_contracts)}")
+        return bre
+    else:
+        debug_print("❌ Не удалось загрузить данные по Brent ни из одного контракта")
+        return pd.DataFrame(columns=['begin', 'brent'])
+
 # ========== ОСНОВНОЙ КОД ==========
-def main_pipeline():
+def main_pipeline(forecast_days=14, output_mode="json"):
     """
     Основная функция для запуска всего пайплайна
-    Максимально приближена к Google Colab версии
+    forecast_days: количество дней для предсказания
+    output_mode: формат вывода ('tg' для Telegram, 'json' для API)
     """
     debug_print(f"🚀 Начинаю полный анализ...")
     
@@ -214,7 +355,9 @@ def main_pipeline():
     today = date.today()
     
     debug_print(f"📅 Сегодня: {today}")
-    debug_print(f"📅 Стартовая дата: {startpars}")
+    debug_print(f"📅 Стартовая дата для данных: {startpars}")
+    debug_print(f"📊 Количество секторов для индексов: {len(sectorsi)}")
+    debug_print(f"📊 Количество секторов для акций: {len(sectors)}")
     
     # ========== ЗАГРУЗКА ИНДЕКСОВ СЕКТОРОВ ==========
     debug_print("🔧 Загружаю и рассчитываю индексы секторов...")
@@ -224,8 +367,9 @@ def main_pipeline():
         debug_print(f"  📈 Обрабатываю сектор: {sector}")
         sector_data = []
         
+        # Загружаем данные по всем акциям сектора
         for ticker in tickers:
-            df = fetch_data_two_parts(ticker, startpars, today.strftime('%Y-%m-%d'), is_index=False)
+            df = fetch_moex_data_paginated(ticker, startpars, today.strftime('%Y-%m-%d'), is_index=False)
             if not df.empty:
                 df = df[['begin', 'close', 'volume', 'value']].rename(
                     columns={'close': ticker, 'volume': f'vol{ticker}', 'value': f'val{ticker}'}
@@ -236,80 +380,93 @@ def main_pipeline():
             debug_print(f"  ❌ Нет данных по сектору {sector}")
             continue
         
+        # Объединяем все акции сектора
         combined_frame = sector_data[0]
         for df in sector_data[1:]:
-            combined_frame = combined_frame.merge(df, on='begin', how='inner')
+            combined_frame = pd.merge(combined_frame, df, on='begin', how='inner')
         
         if combined_frame.empty:
             debug_print(f"  ❌ Нет общих данных в секторе {sector}")
             continue
         
         combined_frame.dropna(inplace=True)
-        combined_frame = add_cap_columns(combined_frame, cap[sector])
         
-        r = combined_frame['begin']
-        combined_frame.set_index('begin', inplace=True)
-        combined_frame.dropna(inplace=True)
+        # Добавляем капитализации
+        if sector in cap:
+            combined_frame = add_cap_columns(combined_frame, cap[sector])
+        
+        # Сохраняем копию без реального индекса для предсказания
         ccomb = combined_frame.copy()
         
-        # Загружаем реальный индекс
-        sec_real = fetch_data_two_parts(sector, startpars, today.strftime('%Y-%m-%d'), is_index=True)
+        # Загружаем реальный индекс сектора
+        sec_real = fetch_moex_data_paginated(sector, startpars, today.strftime('%Y-%m-%d'), is_index=True)
         if sec_real.empty:
             debug_print(f"  ⚠️ Нет данных по реальному индексу {sector}")
-            sec_pred = pd.DataFrame({'begin': r, 'sector': 0})
+            # Создаем пустой индекс
+            sec_pred = pd.DataFrame({
+                'begin': combined_frame['begin'],
+                'sector': 0
+            })
             ind[sector] = sec_pred.drop_duplicates(subset='begin', keep='first')
             continue
         
         sec_real = sec_real[['begin', 'close']].rename(columns={'close': 'sector'})
-        combined_frame = pd.merge(combined_frame.reset_index(), sec_real, on='begin', how='inner')
+        
+        # Объединяем с реальным индексом
+        combined_frame = pd.merge(combined_frame, sec_real, on='begin', how='inner')
+        
+        if combined_frame.empty:
+            debug_print(f"  ⚠️ Нет общих данных с реальным индексом {sector}")
+            # Создаем пустой индекс
+            sec_pred = pd.DataFrame({
+                'begin': ccomb['begin'],
+                'sector': 0
+            })
+            ind[sector] = sec_pred.drop_duplicates(subset='begin', keep='first')
+            continue
+        
+        # Подготавливаем данные для обучения
         combined_frame.set_index('begin', inplace=True)
         combined_frame.dropna(inplace=True)
         
         if len(combined_frame) < 30:
             debug_print(f"  ⚠️ Мало данных для обучения ({len(combined_frame)} строк)")
-            sec_pred = pd.DataFrame({'begin': r, 'sector': 0})
+            # Создаем пустой индекс
+            sec_pred = pd.DataFrame({
+                'begin': ccomb['begin'],
+                'sector': 0
+            })
             ind[sector] = sec_pred.drop_duplicates(subset='begin', keep='first')
             continue
         
         X = combined_frame.drop(columns=['sector'])
         y = combined_frame['sector']
         
+        # Обучаем модель
         model = LGBMRegressor(random_state=1, verbose=-1)
         model.fit(X, y)
         
+        # Предсказываем на всех данных
+        ccomb.set_index('begin', inplace=True)
         pred = model.predict(ccomb)
-        sec_pred = pd.DataFrame({'begin': ccomb.index, 'sector': pred})
+        
+        # Сохраняем предсказания
+        sec_pred = pd.DataFrame({
+            'begin': ccomb.index,
+            'sector': pred
+        })
+        
         ind[sector] = sec_pred.drop_duplicates(subset='begin', keep='first')
-        debug_print(f"  ✅ Сектор {sector}: {len(ind[sector])} предсказаний")
+        debug_print(f"  ✅ Сектор {sector}: {len(ind[sector])} предсказаний, последняя дата: {ind[sector]['begin'].iloc[-1].date()}")
     
     # ========== ЗАГРУЗКА ДАННЫХ BRENT ==========
-    debug_print("🛢️ Загружаю данные по Brent...")
-    brent_contracts = ['BRU3', 'BRU4', 'BRU5', 'BRJ6']
-    bre_all = []
+    bre = fetch_brent_data_optimized(startpars, today.strftime('%Y-%m-%d'))
     
-    for contract in brent_contracts:
-        debug_print(f"  🔄 Загружаю контракт {contract}...")
-        try:
-            j = requests.get(f'http://iss.moex.com/iss/engines/futures/markets/forts/securities/{contract}/candles.json?from={startpars}&till={today}&interval=24').json()
-            if 'candles' in j and 'data' in j['candles'] and j['candles']['data']:
-                dataj = [{k: r[i] for i, k in enumerate(j['candles']['columns'])} for r in j['candles']['data']]
-                framej = pd.DataFrame(dataj)
-                framej['begin'] = pd.to_datetime(framej['begin'])
-                bre_all.append(framej)
-                debug_print(f"    ✅ Загружено {len(framej)} строк")
-            else:
-                debug_print(f"    ⚠️ Нет данных по контракту {contract}")
-        except Exception as e:
-            debug_print(f"    ❌ Ошибка загрузки {contract}: {e}")
-    
-    if bre_all:
-        bre = pd.concat(bre_all, ignore_index=True)
-        bre = bre[['begin', 'close']].rename(columns={'close': 'brent'})
-        bre = bre.sort_values('begin').drop_duplicates(subset='begin', keep='last')
-        debug_print(f"📊 Данных Brent: {len(bre)} строк")
-    else:
-        debug_print("❌ Не удалось загрузить данные по Brent")
+    if bre.empty:
+        debug_print("⚠️ Не удалось загрузить данные Brent, создаю пустой DataFrame")
         bre = pd.DataFrame(columns=['begin', 'brent'])
+    else:
+        debug_print(f"✅ Данные Brent загружены: {len(bre)} строк, последняя дата: {bre['begin'].max().date()}")
     
     # ========== ЗАГРУЗКА И ОБНОВЛЕНИЕ USD ДАННЫХ ==========
     debug_print("💵 Загружаю и обновляю данные по USD...")
@@ -324,11 +481,15 @@ def main_pipeline():
         debug_print("📋 Создаю новый DataFrame...")
         usdtt = pd.DataFrame(columns=['begin', 'usdt'])
     
+    # Определяем последнюю дату в файле
     if usdtt.empty:
         startusd = (today - timedelta(days=30)).strftime('%Y-%m-%d')
+        debug_print("📅 usd_data.json пуст, начинаю загрузку с 30 дней назад")
     else:
-        startusd = usdtt['begin'].iloc[-1]
+        startusd = usdtt['begin'].iloc[-1] if 'begin' in usdtt.columns and not usdtt.empty else (today - timedelta(days=30)).strftime('%Y-%m-%d')
+        debug_print(f"📅 Последняя дата в файле USD: {startusd}")
     
+    # Преобразуем startusd в дату
     try:
         if isinstance(startusd, str):
             start_date = datetime.strptime(startusd, '%Y-%m-%dT%H:%M:%S.%f').date()
@@ -338,20 +499,34 @@ def main_pipeline():
         start_date = today - timedelta(days=30)
     
     end_date = today
+    
     usd_rates = {}
-    current_date = start_date + timedelta(days=1) if start_date < end_date else start_date
+    current_date = start_date + timedelta(days=1)
+    max_retries = 3
     
     debug_print(f"📅 Загружаю данные USD с {current_date} по {end_date}")
     
     while current_date <= end_date:
-        rate = get_currency_rate(current_date)
-        if rate is not None:
-            usd_rates[current_date.strftime("%d/%m/%Y")] = rate
-            debug_print(f"✅ Курс на {current_date}: {rate}")
-        else:
-            debug_print(f"⚠️ Не получен курс на {current_date}")
+        rate = None
+        for attempt in range(max_retries):
+            try:
+                rate = get_currency_rate(current_date)
+                if rate is not None:
+                    usd_rates[current_date.strftime("%d/%m/%Y")] = rate
+                    debug_print(f"✅ Курс на {current_date}: {rate}")
+                    break
+                else:
+                    debug_print(f"⚠️ Попытка {attempt+1}: курс на {current_date} не получен")
+            except Exception as e:
+                debug_print(f"⚠️ Ошибка при запросе {current_date} (попытка {attempt+1}): {e}")
+            time.sleep(0.5)
+        
+        if rate is None:
+            debug_print(f"❌ Не удалось получить курс на {current_date} после {max_retries} попыток")
+        
         current_date += timedelta(days=1)
     
+    # Всегда обновляем файл
     if usd_rates:
         usd_new = pd.DataFrame(list(usd_rates.items()), columns=['begin', 'usdt'])
         usd_new['begin'] = pd.to_datetime(usd_new['begin'], format='%d/%m/%Y')
@@ -363,11 +538,15 @@ def main_pipeline():
             usd = usd_new
     else:
         usd = usdtt.copy()
+        if not usd.empty:
+            new_row = pd.DataFrame({'begin': [pd.Timestamp(end_date)], 'usdt': [np.nan]})
+            usd = pd.concat([usd, new_row], ignore_index=True).drop_duplicates(subset='begin', keep='last')
     
+    # Сохраняем обновленные данные
     with open(file_pa, 'w') as f:
-        json.dump(usd.to_json(date_format='iso'), f)
+        json.dump(usd.to_json(date_format='iso', orient='records'), f)
     
-    debug_print(f"💾 Файл USD сохранен. Теперь строк: {len(usd)}")
+    debug_print(f"💾 Файл USD сохранен. Теперь строк: {len(usd)}, последняя дата: {usd['begin'].max() if not usd.empty else 'нет данных'}")
     
     if 'begin' in usd.columns:
         usd['begin'] = pd.to_datetime(usd['begin'])
@@ -381,13 +560,14 @@ def main_pipeline():
     for sector, tickers in sectors.items():
         sector_data = {}
         for ticker in tickers:
-            df = fetch_data_two_parts(ticker, startpars, today.strftime('%Y-%m-%d'), is_index=False)
+            df = fetch_moex_data_paginated(ticker, startpars, today.strftime('%Y-%m-%d'), is_index=False)
             if df.empty:
                 debug_print(f"  ⚠️ Пропускаю {ticker} - нет данных")
                 continue
             
             df = df[['begin', 'close', 'volume']].rename(columns={'close': 'ticker'})
             
+            # Проверяем, что есть достаточно данных
             if df.shape[0] < 201:
                 debug_print(f"  ⚠️ {ticker}: мало данных ({df.shape[0]} строк)")
                 continue
@@ -428,7 +608,7 @@ def main_pipeline():
             
             df.dropna(inplace=True)
             
-            # Добавляем лаги (ТОЧНО как в Google Colab)
+            # Добавляем лаги
             for column in df.columns:
                 for lag in [7, 14, 28, 35, 31]:
                     if 'lag' not in column and 'rolling' not in column and 'sector_x' not in column:
@@ -441,11 +621,11 @@ def main_pipeline():
     
     debug_print(f"✅ Обработаны данные по {sum(len(v) for v in data_framest.values())} акциям")
     
-    # ========== СОЗДАНИЕ ЦЕЛЕВОЙ ПЕРЕМЕННОЙ (ТОЧНО как в Google Colab) ==========
+    # ========== СОЗДАНИЕ ЦЕЛЕВОЙ ПЕРЕМЕННОЙ ==========
     debug_print("🎯 Создаю целевую переменную...")
-    sppa = []
-    spv = {}
-    smpe = 0
+    sppa = []  # Список акций с большим MAE
+    spv = {}   # Словарь важности фичей
+    smpe = 0   # Среднее MAE по всем акциям
     data_frames = {}
     
     for sector, tickers in sectors.items():
@@ -453,12 +633,12 @@ def main_pipeline():
         for ticker in tickers:
             if ticker in data_framest.get(sector, {}):
                 result = data_framest[sector][ticker].copy()
-                result['target'] = 0
+                result['target'] = 0  # Инициализация колонки с макс % роста
                 
-                # ТОЧНО как в Google Colab: if i + 30 < len(result)
                 for i in range(len(result)):
                     current_close = result.iloc[i]['ticker']
-                    if i + forecast_days < len(result):  # Проверяем следующие 30 дней
+                    # Проверяем следующие forecast_days дней
+                    if i + forecast_days < len(result):
                         future_prices = result.iloc[i + 1:i + 1 + forecast_days]['ticker']
                         result.at[result.index[i], 'target'] = (max(future_prices) - current_close) * 100 / current_close
                 
@@ -467,7 +647,7 @@ def main_pipeline():
         
         data_frames[sector] = sector_data
     
-    # ========== ОБУЧЕНИЕ МОДЕЛЕЙ (ТОЧНО как в Google Colab) ==========
+    # ========== ОБУЧЕНИЕ МОДЕЛЕЙ ==========
     debug_print("🤖 Обучаю модели...")
     param_grid = {
         'num_leaves': [31, 50, 21],
@@ -476,9 +656,11 @@ def main_pipeline():
         'n_estimators': [250, 200]
     }
     
+    # Создаем папку для сохранения параметров моделей
     model_params_dir = 'model_params'
     if not os.path.exists(model_params_dir):
         os.makedirs(model_params_dir)
+        debug_print(f"📁 Создана папка для параметров моделей: {model_params_dir}")
     
     models = {}
     models_learned_today = 0
@@ -488,19 +670,22 @@ def main_pipeline():
         models[sector] = {}
         for ticker in sectors[sector]:
             if ticker in secd:
-                # ТОЧНО как в Google Colab: iloc[:-(1+forecast_days)]
                 X = secd[ticker].drop(columns=['target']).iloc[:-(1 + forecast_days)]
                 y = secd[ticker]['target'].iloc[:-(1 + forecast_days)]
                 
+                # Проверяем, есть ли сохраненные параметры для этой модели
                 param_file = f'{model_params_dir}/{sector}_{ticker}_params.json'
                 
                 if os.path.exists(param_file):
+                    # Загружаем сохраненные параметры
                     with open(param_file, 'r') as f:
                         loaded_params = json.load(f)
                     model = LGBMRegressor(random_state=1, **loaded_params)
                     models_loaded += 1
+                    debug_print(f"  ✅ Загружены параметры для {ticker}")
                 else:
-                    debug_print(f"  🔍 Подбираю параметры для {ticker}...")
+                    # Делаем GridSearch для новых моделей
+                    debug_print(f"  🔍 Подбираю параметры для {ticker} с помощью GridSearch...")
                     model = LGBMRegressor(random_state=1)
                     grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4, verbose=0)
                     grid_search.fit(X, y)
@@ -508,12 +693,14 @@ def main_pipeline():
                     model = best_model
                     best_params = grid_search.best_params_
                     
+                    # Сохраняем параметры модели
                     with open(param_file, 'w') as f:
                         json.dump(best_params, f, indent=2)
                     
                     models_learned_today += 1
+                    debug_print(f"  💾 Сохранены параметры для {ticker}")
                 
-                # Веса для важных примеров (порог 12)
+                # Веса для важных примеров
                 threshold = 12
                 weights = np.where(y > threshold, 2, 1)
                 model.fit(X, y, sample_weight=weights)
@@ -522,8 +709,8 @@ def main_pipeline():
                 cv_scores = cross_val_score(model, X, y, cv=5, scoring='neg_mean_absolute_error')
                 mse_scores = -cv_scores
                 
-                # ТОЧНО как в Google Colab: порог >9.5
-                if mse_scores.mean() > 9.5:
+                # Запоминаем акции с большим MAE
+                if mse_scores.mean() > 7.5:
                     sppa.append(ticker)
                     sppa.append(mse_scores.mean())
                 
@@ -536,6 +723,8 @@ def main_pipeline():
                     spv[X.columns[i]] += model.feature_importances_[i]
                 
                 models[sector][ticker] = model
+    
+    debug_print(f"📊 Загружено моделей: {models_loaded}, обучено новых: {models_learned_today}")
     
     # ========== ПРЕДСКАЗАНИЯ ==========
     debug_print("🔮 Делаю предсказания...")
@@ -556,14 +745,16 @@ def main_pipeline():
         elif pr >= 7.5:
             mn[ticker] = pr
     
-    # Рассчитываем точность как в Google Colab
-    avg_mae = smpe / 100  # ТОЧНО как в Google Colab
-    accuracy = max(0, 100 - avg_mae)
+    # Рассчитываем точность модели (обратная величина от средней ошибки)
+    avg_mae = smpe / len(predictions) if predictions else 100
+    accuracy = max(0, 100 - avg_mae)  # Чем меньше MAE, тем выше точность
     
     # ========== ФОРМИРОВАНИЕ РЕЗУЛЬТАТОВ ==========
+    from datetime import datetime, timezone
+    
     results_data = {
         "date": str(date.today()),
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "predictions": predictions,
         "medium_potential": dict(sr),
         "high_potential": dict(mn),
@@ -576,57 +767,99 @@ def main_pipeline():
             "is_bad_day": len(mn) < 6,
             "is_fifty_fifty": 6 <= len(mn) < 9,
             "is_good_day": len(mn) >= 9
+        },
+        "model_stats": {
+            "models_loaded": models_loaded,
+            "models_learned_today": models_learned_today,
+            "total_models": len(predictions)
         }
     }
     
-    # Сохраняем результаты
+    # Сохраняем результаты для следующего шага
     with open('latest_results.json', 'w') as f:
         json.dump(results_data, f, indent=2)
-    
-    # Выводим результаты как в Google Colab
-    print(f"\n{smpe/100}")
-    print(sppa)
-    
-    if len(mn) < 6:
-        print('BAD DAY')
-    elif len(mn) < 9:
-        print('50/50 DAY')
-    else:
-        print('100% GOOD DAY')
-    
-    print(len(mn))
-    print(sr)
-    print(mn)
     
     debug_print(f"✅ Анализ завершен: {len(predictions)} акций")
     debug_print(f"🎯 Лучших акций: {len(mn)}")
     debug_print(f"📊 Средних акций: {len(sr)}")
     debug_print(f"📈 Точность модели: {accuracy:.1f}%")
+    debug_print(f"🤖 Моделей: загружено {models_loaded}, обучено новых {models_learned_today}")
+    
+    # Сохраняем отладочные данные
+    debug_data = {
+        'analysis_date': str(today),
+        'predictions_count': len(predictions),
+        'usd_data_last_date': str(usd['begin'].max()) if not usd.empty else "нет данных",
+        'brent_data_last_date': str(bre['begin'].max()) if not bre.empty else "нет данных",
+        'brent_data_range': f"{bre['begin'].min().date() if not bre.empty else 'нет'} - {bre['begin'].max().date() if not bre.empty else 'нет'}",
+        'results_summary': results_data['summary'],
+        'model_stats': results_data['model_stats'],
+        'avg_mae': avg_mae,
+        'model_accuracy': accuracy
+    }
+    save_debug_data(debug_data, f"debug_{today}.json")
+    
+    # Выводим важность фичей для отладки
+    if spv:
+        for i in spv.keys():
+            spv[i] = spv[i] / 100
+        sorted_dict = sorted(spv.items(), key=lambda item: item[1], reverse=True)[:10]  # Топ-10 фичей
+        debug_print("🏆 Топ-10 самых важных фичей:")
+        for key, value in sorted_dict:
+            debug_print(f"  {key}: {value:.4f}")
     
     return results_data
 
 def main():
-    """Основная функция"""
+    """Основная функция для GitHub Actions"""
     print("=" * 60)
-    print("🚀 ЗАПУСК ПОЛНОГО АНАЛИЗА")
+    print("🚀 ЗАПУСК ПОЛНОГО АНАЛИЗА В GITHUB ACTIONS")
     print("=" * 60)
     
-    # Проверяем необходимые файлы
+    # Проверяем наличие файла usd_data.json
     if not os.path.exists('usd_data.json'):
-        print("📋 Создаю usd_data.json...")
+        print("❌ Файл usd_data.json не найден!")
+        print("📋 Создаю новый файл с начальными данными...")
+        
         initial_data = pd.DataFrame(columns=['begin', 'usdt'])
         with open('usd_data.json', 'w') as f:
-            json.dump(initial_data.to_json(date_format='iso'), f)
+            json.dump(initial_data.to_json(date_format='iso', orient='records'), f)
+        print("✅ Файл usd_data.json создан")
+    else:
+        print("✅ Файл usd_data.json найден")
     
+    # Проверяем папку для параметров моделей
     if not os.path.exists('model_params'):
-        print("📁 Создаю папку model_params...")
+        print("📁 Создаю папку для параметров моделей...")
         os.makedirs('model_params')
+        print("✅ Папка model_params создана")
+    else:
+        print(f"✅ Папка model_params найдена, файлов: {len(os.listdir('model_params'))}")
     
     try:
-        results = main_pipeline()
+        print("🔧 Запускаю полный анализ...")
+        results = main_pipeline(forecast_days=14, output_mode="json")
+        
+        print(f"✅ Анализ завершен: {len(results.get('predictions', {}))} акций")
+        print(f"🎯 Лучших акций: {results.get('summary', {}).get('high_count', 0)}")
+        print(f"📊 Средних акций: {results.get('summary', {}).get('medium_count', 0)}")
+        print(f"📈 Точность модели: {results.get('model_accuracy', 0)}%")
+        print(f"🤖 Моделей: загружено {results.get('model_stats', {}).get('models_loaded', 0)}, обучено новых {results.get('model_stats', {}).get('models_learned_today', 0)}")
+        
+        # Определяем тип дня
+        if results['summary']['is_bad_day']:
+            day_type = "📉 ПЛОХОЙ ДЕНЬ"
+        elif results['summary']['is_fifty_fifty']:
+            day_type = "🤝 СРЕДНИЙ ДЕНЬ"
+        else:
+            day_type = "📈 ХОРОШИЙ ДЕНЬ"
+        
+        print(f"\n{day_type}")
+        
         return results
+        
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка при анализе: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
