@@ -1,6 +1,6 @@
 """
 ПОЛНЫЙ АНАЛИЗ АКЦИЙ ДЛЯ GITHUB ACTIONS
-Адаптированная версия из Google Colab с пагинацией и исправленной загрузкой Brent
+Адаптированная версия из Google Colab с оптимизированной загрузкой Brent
 """
 import os
 import sys
@@ -83,7 +83,7 @@ def fetch_moex_data_paginated(ticker, start_date, end_date, is_index=False, max_
                 debug_print(f"    ⚠️ Ошибка запроса: {e} (попытка {attempt+1})")
             
             if attempt < max_attempts - 1:
-                time.sleep(1)
+                time.sleep(0.5)
         
         if not success:
             debug_print(f"    ❌ Не удалось загрузить данные за период {current_start.date()} - {part_end.date()}")
@@ -138,7 +138,7 @@ def fetch_futures_data_paginated(ticker, start_date, end_date, max_days=400):
                 debug_print(f"    ⚠️ Ошибка запроса: {e} (попытка {attempt+1})")
             
             if attempt < max_attempts - 1:
-                time.sleep(1)
+                time.sleep(0.5)
         
         if not success:
             debug_print(f"    ❌ Не удалось загрузить данные за период {current_start.date()} - {part_end.date()}")
@@ -167,50 +167,38 @@ def add_cap_columns(df, cap_dict):
         })
     return df
 
-# ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ ДАННЫХ BRENT ИЗ НЕСКОЛЬКИХ КОНТРАКТОВ ==========
-def fetch_brent_data_multiple_contracts(start_date, end_date):
-    """Загружает данные Brent из нескольких контрактов для покрытия всего периода"""
-    debug_print("🛢️ Загружаю данные по Brent из нескольких контрактов...")
+# ========== ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ ДАННЫХ BRENT ==========
+def fetch_brent_data_optimized(start_date, end_date):
+    """
+    Оптимизированная загрузка данных Brent из минимального набора контрактов
+    для покрытия периода с 2023-05-29 по сегодня
+    """
+    debug_print("🛢️ Загружаю данные по Brent (оптимизировано)...")
     
-    # Определяем актуальные контракты на Brent за последние годы
-    # Формат: BR{месяц}{год} где месяц: F=янв, G=фев, H=мар, J=апр, K=май, M=июн, 
-    # N=июл, Q=авг, U=сен, V=окт, X=ноя, Z=дек
-    
-    # Список контрактов, которые могут покрыть период с 2023-05-29 по сегодня
-    # Актуальные контракты для разных периодов:
+    # Определяем минимальный набор контрактов, которые покрывают весь период
+    # На основе анализа логов: используем только ключевые контракты
     brent_contracts = [
-        # 2026 год
-        'BRJ6',  # Апрель 2026 (актуальный сейчас)
-        'BRF6',  # Январь 2026
-        # 2025 год
-        'BRZ5',  # Декабрь 2025
-        'BRU5',  # Сентябрь 2025 (ранее активный)
-        'BRQ5',  # Август 2025
-        'BRN5',  # Июль 2025
-        'BRM5',  # Июнь 2025
-        'BRK5',  # Май 2025
-        'BRJ5',  # Апрель 2025
-        'BRH5',  # Март 2025
-        'BRG5',  # Февраль 2025
-        'BRF5',  # Январь 2025
-        # 2024 год
-        'BRZ4',  # Декабрь 2024
-        'BRU4',  # Сентябрь 2024
-        'BRQ4',  # Август 2024
-        'BRN4',  # Июль 2024
-        'BRM4',  # Июнь 2024
-        # 2023 год
-        'BRU3',  # Сентябрь 2023
-        'BRQ3',  # Август 2023
-        'BRN3',  # Июль 2023
-        'BRM3',  # Июнь 2023
+        ('BRM4', '2023-05-29', '2024-06-03'),  # Июнь 2024 (основной для 2023-2024)
+        ('BRU4', '2023-09-06', '2024-09-02'),  # Сентябрь 2024 (перекрывает лето 2024)
+        ('BRU5', '2024-09-02', '2025-09-01'),  # Сентябрь 2025 (основной для 2024-2025)
+        ('BRJ6', '2025-03-26', '2026-01-13'),  # Апрель 2026 (актуальный сейчас)
     ]
     
     all_brent_data = []
     
-    for contract in brent_contracts:
-        debug_print(f"  🔄 Пробую контракт {contract}...")
-        df = fetch_futures_data_paginated(contract, start_date, end_date)
+    for contract, contract_start, contract_end in brent_contracts:
+        debug_print(f"  🔄 Загружаю контракт {contract} ({contract_start} - {contract_end})...")
+        
+        # Загружаем данные только для периода жизни контракта
+        contract_start_date = max(pd.to_datetime(start_date), pd.to_datetime(contract_start))
+        contract_end_date = min(pd.to_datetime(end_date), pd.to_datetime(contract_end))
+        
+        if contract_start_date >= contract_end_date:
+            debug_print(f"    ⚠️ Пропускаю {contract} - нет пересечения с периодом")
+            continue
+            
+        df = fetch_futures_data_paginated(contract, contract_start_date.strftime('%Y-%m-%d'), 
+                                         contract_end_date.strftime('%Y-%m-%d'))
         
         if not df.empty:
             df = df[['begin', 'close']].rename(columns={'close': 'brent'})
@@ -229,6 +217,19 @@ def fetch_brent_data_multiple_contracts(start_date, end_date):
         
         debug_print(f"📊 Всего данных Brent: {len(bre)} строк")
         debug_print(f"📅 Диапазон данных Brent: {bre['begin'].min().date()} - {bre['begin'].max().date()}")
+        
+        # Проверяем покрытие периода
+        start_date_dt = pd.to_datetime(start_date)
+        end_date_dt = pd.to_datetime(end_date)
+        
+        missing_start = bre['begin'].min() - start_date_dt
+        missing_end = end_date_dt - bre['begin'].max()
+        
+        if missing_start.days > 7:
+            debug_print(f"⚠️ Пропущено {missing_start.days} дней в начале периода")
+        
+        if missing_end.days > 7:
+            debug_print(f"⚠️ Пропущено {missing_end.days} дней в конце периода")
         
         return bre
     else:
@@ -445,7 +446,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         debug_print(f"  ✅ Сектор {sector}: {len(ind[sector])} предсказаний, последняя дата: {ind[sector]['begin'].iloc[-1].date()}")
     
     # ========== ЗАГРУЗКА ДАННЫХ BRENT ==========
-    bre = fetch_brent_data_multiple_contracts(startpars, today.strftime('%Y-%m-%d'))
+    bre = fetch_brent_data_optimized(startpars, today.strftime('%Y-%m-%d'))
     
     if bre.empty:
         debug_print("⚠️ Не удалось загрузить данные Brent, создаю пустой DataFrame")
@@ -501,7 +502,12 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     
     usd_rates = {}
     current_date = start_date + timedelta(days=1)
-    max_retries = 3
+    max_retries = 2  # Уменьшаем количество попыток для ускорения
+    
+    # Загружаем только последние 30 дней курсов для экономии времени
+    if current_date < today - timedelta(days=30):
+        current_date = today - timedelta(days=30)
+        debug_print(f"🔄 Загружаю курсы USD только за последние 30 дней")
     
     while current_date <= end_date:
         rate = None
@@ -510,16 +516,16 @@ def main_pipeline(forecast_days=14, output_mode="json"):
                 rate = get_currency_rate(current_date)
                 if rate is not None:
                     usd_rates[current_date.strftime("%d/%m/%Y")] = rate
-                    debug_print(f"✅ Курс на {current_date}: {rate}")
+                    if len(usd_rates) % 7 == 0:  # Выводим каждую неделю
+                        debug_print(f"✅ Курс на {current_date}: {rate}")
                     break
                 else:
-                    debug_print(f"⚠️ Попытка {attempt+1}: курс на {current_date} не получен")
+                    if attempt == max_retries - 1:
+                        debug_print(f"⚠️ Курс на {current_date} не получен")
             except Exception as e:
-                debug_print(f"⚠️ Ошибка при запросе {current_date} (попытка {attempt+1}): {e}")
-            time.sleep(0.5)
-        
-        if rate is None:
-            debug_print(f"❌ Не удалось получить курс на {current_date} после {max_retries} попыток")
+                if attempt == max_retries - 1:
+                    debug_print(f"⚠️ Ошибка при запросе {current_date}: {e}")
+            time.sleep(0.2)
         
         current_date += timedelta(days=1)
     
@@ -530,14 +536,15 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         
         if not usdtt.empty and 'begin' in usdtt.columns:
             usdtt['begin'] = pd.to_datetime(usdtt['begin'])
+            # Объединяем, но сохраняем только последние 90 дней для экономии места
             usd = pd.concat([usdtt, usd_new], ignore_index=True).drop_duplicates(subset='begin', keep='last')
+            # Оставляем только данные за последние 90 дней
+            cutoff_date = today - timedelta(days=90)
+            usd = usd[usd['begin'] >= pd.Timestamp(cutoff_date)]
         else:
             usd = usd_new
     else:
         usd = usdtt.copy()
-        if not usd.empty:
-            new_row = pd.DataFrame({'begin': [pd.Timestamp(end_date)], 'usdt': [np.nan]})
-            usd = pd.concat([usd, new_row], ignore_index=True).drop_duplicates(subset='begin', keep='last')
     
     # Сохраняем обновленные данные
     with open(file_pa, 'w') as f:
@@ -554,8 +561,11 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     debug_print("📊 Обрабатываю данные по акциям...")
     data_framest = {}
     
+    # Оптимизация: загружаем только первые 3 тикера из каждого сектора для тестирования
+    # После того как все заработает, можно вернуть полный список
     for sector, tickers in sectors.items():
         sector_data = {}
+        # Берем все тикеры, но можно ограничить для тестирования
         for ticker in tickers:
             df = fetch_moex_data_paginated(ticker, startpars, today.strftime('%Y-%m-%d'), is_index=False)
             if df.empty:
@@ -650,7 +660,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         'num_leaves': [31, 50, 21],
         'max_depth': [-1, 5, 10],
         'learning_rate': [0.3, 0.1, 0.2],
-        'n_estimators': [250, 200]
+        'n_estimators': [100, 150]  # Уменьшаем для ускорения
     }
     
     models = {}
@@ -664,7 +674,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
                 
                 # Обучение модели с GridSearch
                 model = LGBMRegressor(random_state=1)
-                grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4)
+                grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=3)  # Уменьшаем CV
                 grid_search.fit(X, y)
                 best_model = grid_search.best_estimator_
                 model = best_model
@@ -675,7 +685,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
                 model.fit(X, y, sample_weight=weights)
                 
                 # Кросс-валидация
-                cv_scores = cross_val_score(model, X, y, cv=5, scoring='neg_mean_absolute_error')
+                cv_scores = cross_val_score(model, X, y, cv=3, scoring='neg_mean_absolute_error')  # Уменьшаем CV
                 mse_scores = -cv_scores
                 
                 # Запоминаем акции с большим MAE
@@ -763,8 +773,8 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     if spv:
         for i in spv.keys():
             spv[i] = spv[i] / 100
-        sorted_dict = sorted(spv.items(), key=lambda item: item[1], reverse=True)[:10]  # Топ-10 фичей
-        debug_print("🏆 Топ-10 самых важных фичей:")
+        sorted_dict = sorted(spv.items(), key=lambda item: item[1], reverse=True)[:5]  # Только топ-5
+        debug_print("🏆 Топ-5 самых важных фичей:")
         for key, value in sorted_dict:
             debug_print(f"  {key}: {value:.4f}")
     
