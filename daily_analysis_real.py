@@ -740,9 +740,9 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     # ========== КЛАССИФИКАЦИЯ РЕЗУЛЬТАТОВ ==========
     sr, mn = {}, {}
     for ticker, pr in predictions.items():
-        if pr > 3.5 and pr < 7.5:
+        if pr > 5.5 and pr < 9.5:
             sr[ticker] = pr
-        elif pr >= 7.5:
+        elif pr >= 9.5:
             mn[ticker] = pr
     
     # Рассчитываем точность модели (обратная величина от средней ошибки)
