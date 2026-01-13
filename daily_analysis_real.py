@@ -458,7 +458,7 @@ def main_pipeline():
                 # ТОЧНО как в Google Colab: if i + 30 < len(result)
                 for i in range(len(result)):
                     current_close = result.iloc[i]['ticker']
-                    if i + 30 < len(result):  # Проверяем следующие 30 дней
+                    if i + forecast_days < len(result):  # Проверяем следующие 30 дней
                         future_prices = result.iloc[i + 1:i + 1 + forecast_days]['ticker']
                         result.at[result.index[i], 'target'] = (max(future_prices) - current_close) * 100 / current_close
                 
