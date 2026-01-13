@@ -1,6 +1,6 @@
 """
 ПОЛНЫЙ АНАЛИЗ АКЦИЙ ДЛЯ GITHUB ACTIONS
-Исправленная версия с разбивкой запросов на части
+Адаптированная версия из Google Colab с пагинацией
 """
 import os
 import sys
@@ -15,7 +15,6 @@ from sklearn.model_selection import GridSearchCV, cross_val_score
 import joblib
 import warnings
 import xml.etree.ElementTree as ET
-from math import comb
 import time
 
 warnings.filterwarnings('ignore')
@@ -153,6 +152,19 @@ def fetch_futures_data_paginated(ticker, start_date, end_date, max_days=400):
     else:
         return pd.DataFrame()
 
+# ========== ФУНКЦИЯ ДОБАВЛЕНИЯ КАПИТАЛИЗАЦИЙ ==========
+def add_cap_columns(df, cap_dict):
+    """Добавляет колонки с капитализацией для расчета индексов"""
+    for key, values in cap_dict.items():
+        column_name = f'cap{key}'
+        df[column_name] = df['begin'].dt.year.map({
+            2023: values[0],
+            2024: values[1],
+            2025: values[2],
+            2026: values[3]
+        })
+    return df
+
 # ========== ОСНОВНОЙ КОД ==========
 def main_pipeline(forecast_days=14, output_mode="json"):
     """
@@ -160,78 +172,75 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     forecast_days: количество дней для предсказания
     output_mode: формат вывода ('tg' для Telegram, 'json' для API)
     """
-    import numpy as np
-    import pandas as pd
-    import requests
-    from datetime import date, timedelta
-    import lightgbm
-    from lightgbm import LGBMRegressor
-    from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
-    from sklearn.metrics import mean_absolute_error, r2_score, precision_score, mean_squared_error, mean_absolute_percentage_error
-    from sklearn.ensemble import GradientBoostingRegressor
-    import joblib
-    import os
-    import json
-    
     debug_print(f"🚀 Начинаю полный анализ...")
     
-    # === КОНФИГУРАЦИЯ ===
-    cap=dict()
-    cap['IMOEX2']={}
-    cap['MOEXOG']={}
-    cap['MOEXMM']={}
-    cap['MOEXIT']={}
-    cap['MOEXFN']={}
-    cap['MOEXEU']={}
-    cap['MOEXRE']={}
-    cap['MOEXTN']={}
-    cap['MOEXCN']={}
-    cap['IMOEX2']['VTBR']=[657.8,505.5,523.8]
-    cap['IMOEX2']['SBER']=[6600,7000,7200]
-    cap['IMOEX2']['GAZP']=[3700,3600,2900]
-    cap['IMOEX2']['LKOH']=[5200,5100,4200]
-    cap['IMOEX2']['T']=[609.3,975.3,862.8]
-    cap['IMOEX2']['GMKN']=[2400,1900,1600]
-    cap['IMOEX2']['PIKK']=[555.7,287.6,412]
-    cap['MOEXOG']['GAZP']=[3700,3600,2900]
-    cap['MOEXOG']['NVTK']=[4400,3600,3100]
-    cap['MOEXOG']['ROSN']=[6200,5700,4500]
-    cap['MOEXOG']['TATN']=[1700,1600,1400]
-    cap['MOEXOG']['LKOH']=[5200,5100,4200]
-    cap['MOEXMM']['GMKN']=[2400,1900,1600]
-    cap['MOEXMM']['MAGN']=[657.1,450.8,367.3]
-    cap['MOEXMM']['NLMK']=[1400,793.5,669,]
-    cap['MOEXMM']['PLZL']=[1100,1900,2600]
-    cap['MOEXMM']['MTLR']=[174.7,174.7,48.4]
-    cap['MOEXIT']['YDEX']=[1500,1800,1600]
-    cap['MOEXIT']['VKCO']=[142.3,70,65.1]
-    cap['MOEXIT']['ASTR']=[144.9,90.3,79.5]
-    cap['MOEXIT']['POSI']=[183.2,92.6,90.8]
-    cap['MOEXIT']['SOFL']=[46.6,44.1,40.1]
-    cap['MOEXFN']['VTBR']=[657.8,505.5,523.8]
-    cap['MOEXFN']['SBER']=[6600,7000,7200]
-    cap['MOEXFN']['T']=[609.3,975.3,862.8]
-    cap['MOEXFN']['SVCB']=[392.8,355.9,334.5]
-    cap['MOEXFN']['BSPB']=[140.9,189.5,166.3]
-    cap['MOEXEU']['IRAO']=[418.9,392.7,330.8]
-    cap['MOEXEU']['UPRO']=[145.2,144.9,95.1]
-    cap['MOEXEU']['FEES']=[245.1,157.3,141.2]
-    cap['MOEXEU']['MSNG']=[87.1,67.9,83.1]
-    cap['MOEXEU']['HYDR']=[339.7,226,200.2]
-    cap['MOEXRE']['PIKK']=[555.7,287.6,412]
-    cap['MOEXRE']['SMLT']=[235.5,79.3,74.8]
-    cap['MOEXRE']['LSRG']=[95.2,88.9,76.7]
-    cap['MOEXRE']['MSTT']=[89.1,61.9,35.7]
-    cap['MOEXTN']['AFLT']=[154.7,299.4,251.5]
-    cap['MOEXTN']['FLOT']=[318.2,221.6,190.6]
-    cap['MOEXTN']['SVAV']=[29.8,22.2,18.6]
-    cap['MOEXTN']['FESH']=[142,256.6,167.2]
-    cap['MOEXTN']['KMAZ']=[129.8,79.9,61.4]
-    cap['MOEXCN']['MVID']=[38.7,18.7,16.2]
-    cap['MOEXCN']['LENT']=[87.6,163.6,165.2]
-    cap['MOEXCN']['MGNT']=[861,466.7,370.1]
-    cap['MOEXCN']['PHOR']=[855.1,904.7,913]
-    cap['MOEXCN']['BELU']=[54.7,91,53.2]
+    # === КОНФИГУРАЦИЯ КАПИТАЛИЗАЦИЙ ===
+    cap = {
+        'IMOEX2': {
+            'VTBR': [657.8, 505.5, 503.8, 471.3],
+            'SBER': [6600, 7000, 6900, 6900],
+            'GAZP': [3700, 3600, 3100, 2900],
+            'LKOH': [5200, 5100, 4200, 3700],
+            'T': [609.3, 975.3, 862.8, 864.6],
+            'GMKN': [2400, 1900, 1600, 2400],
+            'PIKK': [555.7, 287.6, 322, 299.9]
+        },
+        'MOEXOG': {
+            'GAZP': [3700, 3600, 3100, 2900],
+            'NVTK': [4400, 3600, 3500, 3500],
+            'ROSN': [6200, 5700, 4500, 4200],
+            'TATN': [1700, 1600, 1400, 1200],
+            'LKOH': [5200, 5100, 4200, 3700]
+        },
+        'MOEXMM': {
+            'GMKN': [2400, 1900, 1600, 2400],
+            'MAGN': [657.1, 450.8, 367.3, 307.2],
+            'NLMK': [1400, 793.5, 669, 623.2],
+            'PLZL': [1100, 1900, 2600, 3500],
+            'MTLR': [174.7, 63.5, 42.4, 40]
+        },
+        'MOEXIT': {
+            'YDEX': [1500, 1800, 1800, 1800],
+            'VKCO': [142.3, 70, 100, 168.4],
+            'ASTR': [144.9, 90.3, 79.5, 51.7],
+            'POSI': [183.2, 92.6, 88.8, 71.8],
+            'SOFL': [46.6, 44.1, 40.1, 31.3]
+        },
+        'MOEXFN': {
+            'VTBR': [657.8, 505.5, 503.8, 471.3],
+            'SBER': [6600, 7000, 6900, 6900],
+            'T': [609.3, 975.3, 862.8, 864.6],
+            'SVCB': [392.8, 355.9, 334.5, 277.9],
+            'BSPB': [140.9, 189.5, 166.3, 135.6]
+        },
+        'MOEXEU': {
+            'IRAO': [418.9, 392.7, 330.8, 333.9],
+            'UPRO': [145.2, 144.9, 95.1, 91.3],
+            'FEES': [245.1, 157.3, 141.2, 162.6],
+            'MSNG': [67.9, 74.9, 81.1, 86.3],
+            'HYDR': [339.7, 226, 200.2, 185.9]
+        },
+        'MOEXRE': {
+            'PIKK': [555.7, 287.6, 322, 299.9],
+            'SMLT': [235.5, 79.3, 74.8, 57.3],
+            'LSRG': [95.2, 88.9, 76.7, 69],
+            'MSTT': [61.9, 37.2, 33, 31]
+        },
+        'MOEXTN': {
+            'AFLT': [154.7, 299.4, 251.5, 222.9],
+            'FLOT': [318.2, 221.6, 190.6, 175.7],
+            'SVAV': [29.8, 22.2, 18.6, 18.2],
+            'FESH': [256.6, 157.7, 156.6, 155.2],
+            'KMAZ': [129.8, 79.9, 61.4, 59.3]
+        },
+        'MOEXCN': {
+            'MVID': [38.7, 18.7, 16.2, 13.8],
+            'LENT': [87.6, 163.6, 185.2, 231.3],
+            'MGNT': [861, 466.7, 370.1, 307.8],
+            'PHOR': [855.1, 904.7, 903, 823.4],
+            'BELU': [91, 72.8, 53.5, 52]
+        }
+    }
     
     sectors = {
         'MOEXOG': ['TATN','SNGSP','SNGS','TRNFP','TATNP','SIBN','BANEP','BANE','EUTR','YAKG','NVTK','GAZP','ROSN'],
@@ -256,32 +265,24 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         'MOEXCN': ['MVID', 'LENT','MGNT','PHOR','BELU']
     }
     
-    startpars='2023-05-29'
+    startpars = '2023-05-29'
     forecast_days = 14
     today = date.today()
+    
     debug_print(f"📅 Сегодня: {today}")
     debug_print(f"📅 Стартовая дата для данных: {startpars}")
-    debug_print(f"📅 Дата анализа: {today}")
-    debug_print(f"📊 Количество секторов: {len(sectorsi)}")
+    debug_print(f"📊 Количество секторов для индексов: {len(sectorsi)}")
+    debug_print(f"📊 Количество секторов для акций: {len(sectors)}")
     
-    from math import comb
-    
-    def add_cap_columns(df, cap_dict):
-        for key, values in cap_dict.items():
-            column_name = f'cap{key}'
-            df[column_name] = df['begin'].dt.year.map({
-                2023: values[0],
-                2024: values[1],
-                2025: values[2]
-            })
-        return df
-    
-    # ========== ИСПРАВЛЕННАЯ ЗАГРУЗКА ИНДЕКСОВ СЕКТОРОВ ==========
+    # ========== ЗАГРУЗКА ИНДЕКСОВ СЕКТОРОВ ==========
+    debug_print("🔧 Загружаю и рассчитываю индексы секторов...")
     ind = {}
+    
     for sector, tickers in sectorsi.items():
-        debug_print(f"🔧 Обрабатываю сектор: {sector}")
+        debug_print(f"  📈 Обрабатываю сектор: {sector}")
         sector_data = []
         
+        # Загружаем данные по всем акциям сектора
         for ticker in tickers:
             df = fetch_moex_data_paginated(ticker, startpars, today.strftime('%Y-%m-%d'), is_index=False)
             if not df.empty:
@@ -304,50 +305,69 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             continue
         
         combined_frame.dropna(inplace=True)
-        combined_frame = add_cap_columns(combined_frame, cap[sector])
+        
+        # Добавляем капитализации
+        if sector in cap:
+            combined_frame = add_cap_columns(combined_frame, cap[sector])
+        
+        # Сохраняем копию без реального индекса для предсказания
+        ccomb = combined_frame.copy()
         
         # Загружаем реальный индекс сектора
         sec_real = fetch_moex_data_paginated(sector, startpars, today.strftime('%Y-%m-%d'), is_index=True)
         if sec_real.empty:
             debug_print(f"  ⚠️ Нет данных по реальному индексу {sector}")
-            # Используем простую альтернативу
-            ind[sector] = combined_frame[['begin']].copy()
-            ind[sector]['sector'] = 0
+            # Создаем пустой индекс
+            sec_pred = pd.DataFrame({
+                'begin': combined_frame['begin'],
+                'sector': 0
+            })
+            ind[sector] = sec_pred.drop_duplicates(subset='begin', keep='first')
             continue
         
         sec_real = sec_real[['begin', 'close']].rename(columns={'close': 'sector'})
         
         # Объединяем с реальным индексом
-        combined_with_real = pd.merge(combined_frame, sec_real, on='begin', how='inner')
+        combined_frame = pd.merge(combined_frame, sec_real, on='begin', how='inner')
         
-        if combined_with_real.empty:
+        if combined_frame.empty:
             debug_print(f"  ⚠️ Нет общих данных с реальным индексом {sector}")
-            ind[sector] = combined_frame[['begin']].copy()
-            ind[sector]['sector'] = 0
+            # Создаем пустой индекс
+            sec_pred = pd.DataFrame({
+                'begin': ccomb['begin'],
+                'sector': 0
+            })
+            ind[sector] = sec_pred.drop_duplicates(subset='begin', keep='first')
             continue
+        
+        # Подготавливаем данные для обучения
+        combined_frame.set_index('begin', inplace=True)
+        combined_frame.dropna(inplace=True)
+        
+        if len(combined_frame) < 30:
+            debug_print(f"  ⚠️ Мало данных для обучения ({len(combined_frame)} строк)")
+            # Создаем пустой индекс
+            sec_pred = pd.DataFrame({
+                'begin': ccomb['begin'],
+                'sector': 0
+            })
+            ind[sector] = sec_pred.drop_duplicates(subset='begin', keep='first')
+            continue
+        
+        X = combined_frame.drop(columns=['sector'])
+        y = combined_frame['sector']
         
         # Обучаем модель
-        combined_with_real.set_index('begin', inplace=True)
-        combined_with_real.dropna(inplace=True)
-        
-        if len(combined_with_real) < 30:
-            debug_print(f"  ⚠️ Мало данных для обучения ({len(combined_with_real)} строк)")
-            ind[sector] = combined_frame[['begin']].copy()
-            ind[sector]['sector'] = 0
-            continue
-        
-        X = combined_with_real.drop(columns=['sector'])
-        y = combined_with_real['sector']
-        
         model = LGBMRegressor(random_state=1, verbose=-1)
         model.fit(X, y)
         
-        # Предсказываем на тех же данных
-        pred = model.predict(X)
+        # Предсказываем на всех данных
+        ccomb.set_index('begin', inplace=True)
+        pred = model.predict(ccomb)
         
         # Сохраняем предсказания
         sec_pred = pd.DataFrame({
-            'begin': combined_with_real.index,
+            'begin': ccomb.index,
             'sector': pred
         })
         
@@ -475,29 +495,36 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             
             df = df[['begin', 'close', 'volume']].rename(columns={'close': 'ticker'})
             
-            df = pd.merge(df, ind[sector], on='begin', how='left')
+            # Проверяем, что есть достаточно данных
+            if df.shape[0] < 201:
+                debug_print(f"  ⚠️ {ticker}: мало данных ({df.shape[0]} строк)")
+                continue
+            
+            # Объединяем с индексами
             if sector in ind and not ind[sector].empty:
-                df = pd.merge(df, ind[sector], on='begin', how='left')
+                df = pd.merge(df, ind[sector], on='begin', how='inner')
             else:
-                df['sector'] = 0  # Заполняем значением по умолчанию
+                debug_print(f"  ⚠️ Нет предсказаний индекса для {sector}, пропускаю {ticker}")
+                continue
             
             if 'IMOEX2' in ind and not ind['IMOEX2'].empty:
-                df = pd.merge(df, ind['IMOEX2'], on='begin', how='left', suffixes=('', '_imoex'))
+                df = pd.merge(df, ind['IMOEX2'], on='begin', how='inner')
             else:
-                df['sector_imoex'] = 0
+                debug_print(f"  ⚠️ Нет предсказаний IMOEX2, пропускаю {ticker}")
+                continue
             
+            # Объединяем с USD и Brent
             if not usd.empty:
-                df = pd.merge(df, usd, on='begin', how='left')
+                df = pd.merge(df, usd, on='begin', how='inner')
             else:
-                df['usdt'] = 0
+                debug_print(f"  ⚠️ Нет данных USD, пропускаю {ticker}")
+                continue
             
             if not bre.empty:
-                df = pd.merge(df, bre, on='begin', how='left')
+                df = pd.merge(df, bre, on='begin', how='inner')
             else:
-                df['brent'] = 0
-            
-            # Заполняем NaN значениями
-            df = df.fillna(method='ffill').fillna(method='bfill')
+                debug_print(f"  ⚠️ Нет данных Brent, пропускаю {ticker}")
+                continue
             
             df.set_index('begin', inplace=True)
             df.dropna(inplace=True)
@@ -522,18 +549,11 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     
     debug_print(f"✅ Обработаны данные по {sum(len(v) for v in data_framest.values())} акциям")
     
-    for sector in data_framest:
-        for ticker in data_framest[sector]:
-            if not data_framest[sector][ticker].empty:
-                last_date = data_framest[sector][ticker].index[-1].date()
-                debug_print(f"  📅 {ticker}: последняя дата данных: {last_date}")
-                break  # Чтобы не выводить все
-        break
     # ========== СОЗДАНИЕ ЦЕЛЕВОЙ ПЕРЕМЕННОЙ ==========
     debug_print("🎯 Создаю целевую переменную...")
-    sppa = []
-    spv = {}
-    smpe = 0
+    sppa = []  # Список акций с большим MAE
+    spv = {}   # Словарь важности фичей
+    smpe = 0   # Среднее MAE по всем акциям
     data_frames = {}
     
     for sector, tickers in sectors.items():
@@ -541,29 +561,17 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         for ticker in tickers:
             if ticker in data_framest.get(sector, {}):
                 result = data_framest[sector][ticker].copy()
-                result['target'] = 0.0
+                result['target'] = 0  # Инициализация колонки с макс % роста
                 
-                # ИСПРАВЛЕНИЕ: Правильно рассчитываем цель для каждой строки
                 for i in range(len(result)):
+                    current_close = result.iloc[i]['ticker']
+                    # Проверяем следующие forecast_days дней
                     if i + forecast_days < len(result):
-                        current_close = result.iloc[i]['ticker']
-                        # Ищем максимум в ближайшие forecast_days дней
-                        future_start = i + 1
-                        future_end = min(i + 1 + forecast_days, len(result))
-                        
-                        if future_start < future_end:
-                            future_prices = result.iloc[future_start:future_end]['ticker']
-                            if len(future_prices) > 0:
-                                max_future = future_prices.max()
-                                result.at[result.index[i], 'target'] = (max_future - current_close) * 100 / current_close
+                        future_prices = result.iloc[i + 1:i + 1 + forecast_days]['ticker']
+                        result.at[result.index[i], 'target'] = (max(future_prices) - current_close) * 100 / current_close
                 
-                # Сохраняем ВСЕ данные, включая последние дни (даже с target=0)
-                # Они понадобятся для предсказания
+                result.dropna(inplace=True)
                 sector_data[ticker] = result
-                
-                # Отладочная информация
-                last_date = result.index[-1].date() if len(result) > 0 else "нет данных"
-                debug_print(f"  📊 {ticker}: {len(result)} строк, последняя дата: {last_date}")
         
         data_frames[sector] = sector_data
     
@@ -585,25 +593,30 @@ def main_pipeline(forecast_days=14, output_mode="json"):
                 X = secd[ticker].drop(columns=['target']).iloc[:-(1 + forecast_days)]
                 y = secd[ticker]['target'].iloc[:-(1 + forecast_days)]
                 
+                # Обучение модели с GridSearch
                 model = LGBMRegressor(random_state=1)
                 grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4)
                 grid_search.fit(X, y)
                 best_model = grid_search.best_estimator_
                 model = best_model
                 
+                # Веса для важных примеров
                 threshold = 12
                 weights = np.where(y > threshold, 2, 1)
                 model.fit(X, y, sample_weight=weights)
                 
+                # Кросс-валидация
                 cv_scores = cross_val_score(model, X, y, cv=5, scoring='neg_mean_absolute_error')
                 mse_scores = -cv_scores
                 
+                # Запоминаем акции с большим MAE
                 if mse_scores.mean() > 7.5:
                     sppa.append(ticker)
                     sppa.append(mse_scores.mean())
                 
                 smpe += mse_scores.mean()
                 
+                # Собираем важность фичей
                 for i in range(len(model.feature_importances_)):
                     if X.columns[i] not in spv.keys():
                         spv[X.columns[i]] = 0
@@ -618,61 +631,10 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     for sector, secd in data_frames.items():
         for ticker in sectors[sector]:
             if ticker in secd and ticker in models.get(sector, {}):
-                # ИСПРАВЛЕНИЕ: Берем последние данные из data_framest, а не из secd
-                if sector in data_framest and ticker in data_framest[sector]:
-                    # Берем последнюю строку из исходных данных (самые свежие)
-                    last_data = data_framest[sector][ticker].iloc[-1:].copy()
-                    
-                    # Убедимся, что у нас те же признаки, что при обучении
-                    # Добавляем временные фичи для последней строки
-                    X_cols = models[sector][ticker].feature_names_in_
-                    
-                    # Если в last_data нет всех нужных колонок, создаем их
-                    for col in X_cols:
-                        if col not in last_data.columns and col != 'target':
-                            # Пытаемся создать недостающие фичи
-                            if '_lag_' in col:
-                                base_col = col.split('_lag_')[0]
-                                lag = int(col.split('_lag_')[1])
-                                # Для лагов нужно взять значения из предыдущих строк
-                                if len(data_framest[sector][ticker]) > lag:
-                                    last_data[col] = data_framest[sector][ticker][base_col].iloc[-lag-1]
-                                else:
-                                    last_data[col] = np.nan
-                            elif '_rolling5' in col:
-                                base_col = col.replace('_rolling5', '')
-                                if len(data_framest[sector][ticker]) >= 5:
-                                    last_data[col] = data_framest[sector][ticker][base_col].iloc[-5:].mean()
-                                else:
-                                    last_data[col] = np.nan
-                    
-                    # Заполняем NaN средними значениями
-                    last_data = last_data.fillna(method='ffill').fillna(method='bfill')
-                    
-                    # Отладочная информация
-                    debug_print(f"  📈 {ticker}: предсказание для {last_data.index[-1].date()}")
-                    
-                    try:
-                        prediction = models[sector][ticker].predict(last_data[X_cols])
-                        predictions[ticker] = float(prediction[0])
-                    except Exception as e:
-                        debug_print(f"  ⚠️ Ошибка предсказания {ticker}: {e}")
-                        # Пробуем альтернативный способ
-                        try:
-                            last_data_simple = secd[ticker].drop(columns=['target']).iloc[-1:].copy()
-                            prediction = models[sector][ticker].predict(last_data_simple)
-                            predictions[ticker] = float(prediction[0])
-                        except:
-                            predictions[ticker] = 0.0
-                else:
-                    # Запасной вариант
-                    try:
-                        last_data = secd[ticker].drop(columns=['target']).iloc[-1:].copy()
-                        prediction = models[sector][ticker].predict(last_data)
-                        predictions[ticker] = float(prediction[0])
-                    except:
-                        predictions[ticker] = 0.0
-        
+                last_data = secd[ticker].drop(columns=['target']).iloc[-1].copy()
+                prediction = models[sector][ticker].predict([last_data])
+                predictions[ticker] = float(prediction[0])
+    
     # ========== КЛАССИФИКАЦИЯ РЕЗУЛЬТАТОВ ==========
     sr, mn = {}, {}
     for ticker, pr in predictions.items():
@@ -680,6 +642,10 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             sr[ticker] = pr
         elif pr >= 7.5:
             mn[ticker] = pr
+    
+    # Рассчитываем точность модели (обратная величина от средней ошибки)
+    avg_mae = smpe / len(predictions) if predictions else 100
+    accuracy = max(0, 100 - avg_mae)  # Чем меньше MAE, тем выше точность
     
     # ========== ФОРМИРОВАНИЕ РЕЗУЛЬТАТОВ ==========
     from datetime import datetime, timezone
@@ -691,7 +657,8 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         "medium_potential": dict(sr),
         "high_potential": dict(mn),
         "poor_accuracy": sppa,
-        "avg_mae": smpe / 100,
+        "avg_mae": avg_mae,
+        "model_accuracy": round(accuracy, 1),
         "summary": {
             "high_count": len(mn),
             "medium_count": len(sr),
@@ -708,15 +675,28 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     debug_print(f"✅ Анализ завершен: {len(predictions)} акций")
     debug_print(f"🎯 Лучших акций: {len(mn)}")
     debug_print(f"📊 Средних акций: {len(sr)}")
+    debug_print(f"📈 Точность модели: {accuracy:.1f}%")
     
     # Сохраняем отладочные данные
     debug_data = {
         'analysis_date': str(today),
         'predictions_count': len(predictions),
         'usd_data_last_date': str(usd['begin'].max()) if not usd.empty else "нет данных",
-        'results_summary': results_data['summary']
+        'brent_data_last_date': str(bre['begin'].max()) if not bre.empty else "нет данных",
+        'results_summary': results_data['summary'],
+        'avg_mae': avg_mae,
+        'model_accuracy': accuracy
     }
     save_debug_data(debug_data, f"debug_{today}.json")
+    
+    # Выводим важность фичей для отладки
+    if spv:
+        for i in spv.keys():
+            spv[i] = spv[i] / 100
+        sorted_dict = sorted(spv.items(), key=lambda item: item[1], reverse=True)[:10]  # Топ-10 фичей
+        debug_print("🏆 Топ-10 самых важных фичей:")
+        for key, value in sorted_dict:
+            debug_print(f"  {key}: {value:.4f}")
     
     return results_data
 
@@ -743,6 +723,17 @@ def main():
         print(f"✅ Анализ завершен: {len(results.get('predictions', {}))} акций")
         print(f"🎯 Лучших акций: {results.get('summary', {}).get('high_count', 0)}")
         print(f"📊 Средних акций: {results.get('summary', {}).get('medium_count', 0)}")
+        print(f"📈 Точность модели: {results.get('model_accuracy', 0)}%")
+        
+        # Определяем тип дня
+        if results['summary']['is_bad_day']:
+            day_type = "📉 ПЛОХОЙ ДЕНЬ"
+        elif results['summary']['is_fifty_fifty']:
+            day_type = "🤝 СРЕДНИЙ ДЕНЬ"
+        else:
+            day_type = "📈 ХОРОШИЙ ДЕНЬ"
+        
+        print(f"\n{day_type}")
         
         with open('latest_results.json', 'w') as f:
             json.dump(results, f, indent=2)
