@@ -330,12 +330,12 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     sectors = {
         'MOEXOG': ['TATN','SNGSP','SNGS','TRNFP','TATNP','SIBN','BANEP','BANE','EUTR','YAKG','NVTK','GAZP','ROSN'],
         'MOEXMM': ['GMKN', 'MAGN','RUAL','ALRS','SELG','RASP','UGLD','BLNG','NLMK','CHMF','MTLR','ENPG'],
-        'MOEXIT': ['VKCO', 'ASTR', 'POSI','SOFL','RTKMP','MTSS','DATA','SVET','MGTSP','NSVZ','CNTL','CNTLP','AFKS','RTKM','RBCM'],
-        'MOEXFN': ['SBER', 'SVCB','BSPB','MOEX','SBERP','MBNK','RENI','CARM','LEAS','SFIN','ZAYM','CBOM','MGKL'],
+        'MOEXIT': ['VKCO', 'ASTR', 'POSI','SOFL','RTKMP','MTSS','DATA','HEAD','DIAS','MGTSP','CNTL','CNTLP','AFKS','RTKM','RBCM'],
+        'MOEXFN': ['SBER', 'SVCB','MOEX','SBERP','MBNK','RENI','CARM','LEAS','SFIN','ZAYM','CBOM','MGKL'],
         'MOEXEU': ['IRAO', 'FEES','MSNG','HYDR','MRKV','TGKA','OGKB','ELFV','MSRS','TGKBP','MRKY','TGKN','LSNG','UPRO','MAGE'],
         'MOEXRE': ['LSRG','WTCMP','MSTT','WTCM','SMLT','PRFN'],
-        'MOEXTN': ['FLOT','NMTP','ELMT','UWGN','SVAV','UNAC','AFLT'],
-        'MOEXCN': ['MVID', 'LENT','BELU','APTK','MDMG','KLVZ','AQUA','DELI','GEMC','HNFG','KROT','NKNCP','NKNC','KZOS','KZOSP','PRMD','VSEH','ABIO','LIFE']
+        'MOEXTN': ['FLOT','NMTP','ELMT','KMAZ','WUSH','SVAV','AFLT'],
+        'MOEXCN': ['MVID','BELU','APTK','MDMG','KLVZ','AQUA','DELI','GEMC','HNFG','X5','LENT','RAGR','NKNCP','NKNC','KZOS','KZOSP','PRMD','VSEH','ABIO','LIFE']
     }
     
     sectorsi = {
