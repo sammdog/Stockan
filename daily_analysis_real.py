@@ -1,6 +1,6 @@
 """
 ПОЛНЫЙ АНАЛИЗ АКЦИЙ ДЛЯ GITHUB ACTIONS
-Адаптированная версия из Google Colab с пагинацией и исправленной загрузкой Brent
+Адаптированная версия из Google Colab с оптимизированной загрузкой Brent
 """
 import os
 import sys
@@ -17,6 +17,11 @@ import warnings
 import xml.etree.ElementTree as ET
 import time
 
+# ========== КОНФИГУРАЦИЯ И ПРЕДУПРЕЖДЕНИЯ ==========
+def warn(*args, **kwargs):
+    pass
+
+warnings.warn = warn
 warnings.filterwarnings('ignore')
 
 # ========== ДИАГНОСТИЧЕСКИЕ ФУНКЦИИ ==========
@@ -31,7 +36,7 @@ def save_debug_data(data, filename):
     debug_print(f"Сохранены отладочные данные в {filename}")
 
 # ========== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ MOEX ==========
-def fetch_moex_data_paginated(ticker, start_date, end_date, is_index=False, max_days=400):
+def fetch_moex_data_paginated(ticker, start_date, end_date, is_index=False, max_days=500):
     """
     Загружает данные MOEX с разбивкой на части
     MOEX API ограничивает 500 строк за запрос
@@ -99,7 +104,7 @@ def fetch_moex_data_paginated(ticker, start_date, end_date, is_index=False, max_
         debug_print(f"  ❌ Нет данных по {ticker}")
         return pd.DataFrame()
 
-def fetch_futures_data_paginated(ticker, start_date, end_date, max_days=400):
+def fetch_futures_data_paginated(ticker, start_date, end_date, max_days=500):
     """Загружает данные фьючерсов с разбивкой на части"""
     all_data = []
     current_start = pd.to_datetime(start_date)
@@ -167,103 +172,78 @@ def add_cap_columns(df, cap_dict):
         })
     return df
 
-# ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ ДАННЫХ BRENT ИЗ НЕСКОЛЬКИХ КОНТРАКТОВ ==========
-def fetch_brent_data_multiple_contracts(start_date, end_date):
-    """Загружает данные Brent из нескольких контрактов для покрытия всего периода"""
-    debug_print("🛢️ Загружаю данные по Brent из нескольких контрактов...")
+# ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ USD ==========
+def get_currency_rate(date):
+    """Получает курс доллара на указанную дату"""
+    url = f'https://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            for valute in root.findall('Valute'):
+                char_code = valute.find('CharCode').text
+                if char_code == 'USD':
+                    value = valute.find('Value').text
+                    return float(value.replace(',', '.'))
+    except Exception as e:
+        debug_print(f"Ошибка при запросе курса на {date.strftime('%d/%m/%Y')}: {e}")
+    return None
+
+# ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ BRENT ==========
+def fetch_brent_data_optimized(start_date, end_date):
+    """Загружает данные Brent из минимального набора контрактов (4 контракта)"""
+    debug_print("🛢️ Загружаю данные по Brent из минимального набора контрактов...")
     
-    # Преобразуем даты для работы с ними
-    start_date_dt = pd.to_datetime(start_date)
-    end_date_dt = pd.to_datetime(end_date)
+    # Определяем нужные контракты на каждый год с 2023 по 2026
+    brent_contracts = ['BRU3', 'BRU4', 'BRU5', 'BRJ6']
     
-    # Определяем годы, которые нужно покрыть (2023-2026)
-    start_year = start_date_dt.year
-    end_year = end_date_dt.year
-    
-    # Для каждого года берем 1-2 ключевых контракта
-    # Поскольку контракты действуют примерно с сентября до сентября,
-    # берем сентябрьский (U) и декабрьский (Z) контракты для каждого года
-    brent_contracts = []
-    
-    for year in range(start_year, end_year + 1):
-        # Определяем месяц для кода контракта
-        # Сентябрьский контракт для каждого года (наиболее ликвидный)
-        if year <= 2026:  # Проверяем, что год не слишком далеко в будущем
-            month_code = 'U'  # Сентябрь
-            year_code = str(year)[-1]  # Последняя цифра года
-            contract = f'BR{month_code}{year_code}'
-            brent_contracts.append(contract)
-            
-            # Для текущего года также берем ближайший квартальный контракт
-            if year == end_year:
-                # Определяем текущий месяц
-                current_month = end_date_dt.month
-                # Месяца и их коды: F=янв, G=фев, H=мар, J=апр, K=май, M=июн, 
-                # N=июл, Q=авг, U=сен, V=окт, X=ноя, Z=дек
-                month_codes = {
-                    1: 'F', 2: 'G', 3: 'H', 4: 'J', 5: 'K', 6: 'M',
-                    7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z'
-                }
-                
-                # Берем следующий квартальный контракт от текущего месяца
-                if current_month <= 3:
-                    extra_contract = f'BRM{year_code}'  # Июнь
-                elif current_month <= 6:
-                    extra_contract = f'BRU{year_code}'  # Сентябрь
-                elif current_month <= 9:
-                    extra_contract = f'BRZ{year_code}'  # Декабрь
-                else:
-                    # Если уже декабрь, берем март следующего года
-                    next_year_code = str(year + 1)[-1]
-                    extra_contract = f'BRH{next_year_code}'  # Март следующего года
-                
-                if extra_contract not in brent_contracts:
-                    brent_contracts.append(extra_contract)
-    
-    # Оставляем только уникальные контракты
-    brent_contracts = list(set(brent_contracts))
-    
-    debug_print(f"📋 Загружаемые контракты: {brent_contracts}")
-    
-    all_brent_data = []
+    bre_all = []
+    loaded_contracts = []
     
     for contract in brent_contracts:
         debug_print(f"  🔄 Загружаю контракт {contract}...")
-        df = fetch_futures_data_paginated(contract, start_date, end_date)
         
-        if not df.empty:
-            df = df[['begin', 'close']].rename(columns={'close': 'brent'})
-            all_brent_data.append(df)
-            debug_print(f"    ✅ Загружено {len(df)} строк из {contract}")
+        try:
+            # Используем пагинацию для каждого контракта
+            df = fetch_futures_data_paginated(contract, start_date, end_date)
             
-            # Логируем диапазон дат для этого контракта
             if not df.empty:
-                debug_print(f"    📅 Диапазон {contract}: {df['begin'].min().date()} - {df['begin'].max().date()}")
-        else:
-            debug_print(f"    ⚠️ Нет данных по контракту {contract}")
+                df = df[['begin', 'close']].rename(columns={'close': 'brent'})
+                bre_all.append(df)
+                loaded_contracts.append(contract)
+                debug_print(f"    ✅ Загружено {len(df)} строк")
+                
+                # Логируем диапазон дат для этого контракта
+                if not df.empty:
+                    debug_print(f"    📅 {contract}: {df['begin'].min().date()} - {df['begin'].max().date()}")
+            else:
+                debug_print(f"    ⚠️ Нет данных по контракту {contract}")
+        except Exception as e:
+            debug_print(f"    ❌ Ошибка загрузки {contract}: {e}")
     
-    if all_brent_data:
-        # Объединяем все данные
-        bre = pd.concat(all_brent_data, ignore_index=True)
+    # Объединяем все данные
+    if bre_all:
+        bre = pd.concat(bre_all, ignore_index=True)
+        bre = bre[['begin', 'brent']]
         
-        # Сортируем по дате
-        bre = bre.sort_values('begin')
+        # Сортируем по дате и удаляем дубликаты
+        bre = bre.sort_values('begin').drop_duplicates(subset='begin', keep='last')
         
-        # Удаляем дубликаты по дате, оставляя последнее значение 
-        # (предполагаем, что более новые контракты имеют более актуальные цены)
-        bre = bre.drop_duplicates(subset='begin', keep='last')
-        
-        # Проверяем наличие пропусков
-        bre_dates = sorted(bre['begin'].unique())
-        if len(bre_dates) > 1:
-            date_range = pd.date_range(start=bre_dates[0], end=bre_dates[-1])
-            missing_dates = date_range.difference(bre_dates)
-            if len(missing_dates) > 0:
+        # Выводим информацию о диапазоне дат
+        if not bre.empty:
+            debug_print(f"📊 Всего данных Brent: {len(bre)} строк")
+            debug_print(f"📅 Диапазон данных Brent: {bre['begin'].min().date()} - {bre['begin'].max().date()}")
+            
+            # Проверяем наличие пропусков
+            date_range = pd.date_range(start=bre['begin'].min(), end=bre['begin'].max())
+            missing_dates = [d for d in date_range if d not in bre['begin'].values]
+            if missing_dates:
                 debug_print(f"⚠️ Обнаружены пропуски в данных Brent: {len(missing_dates)} дней")
+        else:
+            debug_print("⚠️ Данные Brent пусты после объединения")
+            bre = pd.DataFrame(columns=['begin', 'brent'])
         
-        debug_print(f"📊 Всего данных Brent: {len(bre)} строк")
-        debug_print(f"📅 Диапазон данных Brent: {bre['begin'].min().date()} - {bre['begin'].max().date()}")
-        
+        debug_print(f"✅ Успешно загружены контракты: {', '.join(loaded_contracts)}")
         return bre
     else:
         debug_print("❌ Не удалось загрузить данные по Brent ни из одного контракта")
@@ -479,7 +459,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         debug_print(f"  ✅ Сектор {sector}: {len(ind[sector])} предсказаний, последняя дата: {ind[sector]['begin'].iloc[-1].date()}")
     
     # ========== ЗАГРУЗКА ДАННЫХ BRENT ==========
-    bre = fetch_brent_data_multiple_contracts(startpars, today.strftime('%Y-%m-%d'))
+    bre = fetch_brent_data_optimized(startpars, today.strftime('%Y-%m-%d'))
     
     if bre.empty:
         debug_print("⚠️ Не удалось загрузить данные Brent, создаю пустой DataFrame")
@@ -503,24 +483,10 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     # Определяем последнюю дату в файле
     if usdtt.empty:
         startusd = (today - timedelta(days=30)).strftime('%Y-%m-%d')
+        debug_print("📅 usd_data.json пуст, начинаю загрузку с 30 дней назад")
     else:
         startusd = usdtt['begin'].iloc[-1] if 'begin' in usdtt.columns and not usdtt.empty else (today - timedelta(days=30)).strftime('%Y-%m-%d')
-    
-    debug_print(f"📅 Последняя дата в файле USD: {startusd}")
-    
-    def get_currency_rate(date):
-        url = f'https://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
-        response = requests.get(url)
-        if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            for valute in root.findall('Valute'):
-                char_code = valute.find('CharCode').text
-                if char_code == 'USD':
-                    value = valute.find('Value').text
-                    return float(value.replace(',', '.'))
-        else:
-            debug_print(f'⚠️ Ошибка при запросе данных за {date.strftime("%d/%m/%Y")}: {response.status_code}')
-        return None
+        debug_print(f"📅 Последняя дата в файле USD: {startusd}")
     
     # Преобразуем startusd в дату
     try:
@@ -536,6 +502,8 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     usd_rates = {}
     current_date = start_date + timedelta(days=1)
     max_retries = 3
+    
+    debug_print(f"📅 Загружаю данные USD с {current_date} по {end_date}")
     
     while current_date <= end_date:
         rate = None
@@ -810,6 +778,7 @@ def main():
     print("🚀 ЗАПУСК ПОЛНОГО АНАЛИЗА В GITHUB ACTIONS")
     print("=" * 60)
     
+    # Проверяем наличие файла usd_data.json
     if not os.path.exists('usd_data.json'):
         print("❌ Файл usd_data.json не найден!")
         print("📋 Создаю новый файл с начальными данными...")
@@ -817,8 +786,9 @@ def main():
         initial_data = pd.DataFrame(columns=['begin', 'usdt'])
         with open('usd_data.json', 'w') as f:
             json.dump(initial_data.to_json(date_format='iso', orient='records'), f)
-    
-    print("✅ Файл usd_data.json найден или создан")
+        print("✅ Файл usd_data.json создан")
+    else:
+        print("✅ Файл usd_data.json найден")
     
     try:
         print("🔧 Запускаю полный анализ...")
@@ -838,9 +808,6 @@ def main():
             day_type = "📈 ХОРОШИЙ ДЕНЬ"
         
         print(f"\n{day_type}")
-        
-        with open('latest_results.json', 'w') as f:
-            json.dump(results, f, indent=2)
         
         return results
         
