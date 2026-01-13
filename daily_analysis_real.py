@@ -1,6 +1,7 @@
 """
 ПОЛНЫЙ АНАЛИЗ АКЦИЙ ДЛЯ GITHUB ACTIONS
 Адаптированная версия из Google Colab с оптимизированной загрузкой Brent
+и сохранением параметров моделей
 """
 import os
 import sys
@@ -655,7 +656,15 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         'n_estimators': [250, 200]
     }
     
+    # Создаем папку для сохранения параметров моделей
+    model_params_dir = 'model_params'
+    if not os.path.exists(model_params_dir):
+        os.makedirs(model_params_dir)
+        debug_print(f"📁 Создана папка для параметров моделей: {model_params_dir}")
+    
     models = {}
+    models_learned_today = 0
+    models_loaded = 0
     
     for sector, secd in data_frames.items():
         models[sector] = {}
@@ -664,12 +673,32 @@ def main_pipeline(forecast_days=14, output_mode="json"):
                 X = secd[ticker].drop(columns=['target']).iloc[:-(1 + forecast_days)]
                 y = secd[ticker]['target'].iloc[:-(1 + forecast_days)]
                 
-                # Обучение модели с GridSearch
-                model = LGBMRegressor(random_state=1)
-                grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4)
-                grid_search.fit(X, y)
-                best_model = grid_search.best_estimator_
-                model = best_model
+                # Проверяем, есть ли сохраненные параметры для этой модели
+                param_file = f'{model_params_dir}/{sector}_{ticker}_params.json'
+                
+                if os.path.exists(param_file):
+                    # Загружаем сохраненные параметры
+                    with open(param_file, 'r') as f:
+                        loaded_params = json.load(f)
+                    model = LGBMRegressor(random_state=1, **loaded_params)
+                    models_loaded += 1
+                    debug_print(f"  ✅ Загружены параметры для {ticker}")
+                else:
+                    # Делаем GridSearch для новых моделей
+                    debug_print(f"  🔍 Подбираю параметры для {ticker} с помощью GridSearch...")
+                    model = LGBMRegressor(random_state=1)
+                    grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4, verbose=0)
+                    grid_search.fit(X, y)
+                    best_model = grid_search.best_estimator_
+                    model = best_model
+                    best_params = grid_search.best_params_
+                    
+                    # Сохраняем параметры модели
+                    with open(param_file, 'w') as f:
+                        json.dump(best_params, f, indent=2)
+                    
+                    models_learned_today += 1
+                    debug_print(f"  💾 Сохранены параметры для {ticker}")
                 
                 # Веса для важных примеров
                 threshold = 12
@@ -694,6 +723,8 @@ def main_pipeline(forecast_days=14, output_mode="json"):
                     spv[X.columns[i]] += model.feature_importances_[i]
                 
                 models[sector][ticker] = model
+    
+    debug_print(f"📊 Загружено моделей: {models_loaded}, обучено новых: {models_learned_today}")
     
     # ========== ПРЕДСКАЗАНИЯ ==========
     debug_print("🔮 Делаю предсказания...")
@@ -736,6 +767,11 @@ def main_pipeline(forecast_days=14, output_mode="json"):
             "is_bad_day": len(mn) < 6,
             "is_fifty_fifty": 6 <= len(mn) < 9,
             "is_good_day": len(mn) >= 9
+        },
+        "model_stats": {
+            "models_loaded": models_loaded,
+            "models_learned_today": models_learned_today,
+            "total_models": len(predictions)
         }
     }
     
@@ -747,6 +783,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
     debug_print(f"🎯 Лучших акций: {len(mn)}")
     debug_print(f"📊 Средних акций: {len(sr)}")
     debug_print(f"📈 Точность модели: {accuracy:.1f}%")
+    debug_print(f"🤖 Моделей: загружено {models_loaded}, обучено новых {models_learned_today}")
     
     # Сохраняем отладочные данные
     debug_data = {
@@ -756,6 +793,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
         'brent_data_last_date': str(bre['begin'].max()) if not bre.empty else "нет данных",
         'brent_data_range': f"{bre['begin'].min().date() if not bre.empty else 'нет'} - {bre['begin'].max().date() if not bre.empty else 'нет'}",
         'results_summary': results_data['summary'],
+        'model_stats': results_data['model_stats'],
         'avg_mae': avg_mae,
         'model_accuracy': accuracy
     }
@@ -790,6 +828,14 @@ def main():
     else:
         print("✅ Файл usd_data.json найден")
     
+    # Проверяем папку для параметров моделей
+    if not os.path.exists('model_params'):
+        print("📁 Создаю папку для параметров моделей...")
+        os.makedirs('model_params')
+        print("✅ Папка model_params создана")
+    else:
+        print(f"✅ Папка model_params найдена, файлов: {len(os.listdir('model_params'))}")
+    
     try:
         print("🔧 Запускаю полный анализ...")
         results = main_pipeline(forecast_days=14, output_mode="json")
@@ -798,6 +844,7 @@ def main():
         print(f"🎯 Лучших акций: {results.get('summary', {}).get('high_count', 0)}")
         print(f"📊 Средних акций: {results.get('summary', {}).get('medium_count', 0)}")
         print(f"📈 Точность модели: {results.get('model_accuracy', 0)}%")
+        print(f"🤖 Моделей: загружено {results.get('model_stats', {}).get('models_loaded', 0)}, обучено новых {results.get('model_stats', {}).get('models_learned_today', 0)}")
         
         # Определяем тип дня
         if results['summary']['is_bad_day']:
