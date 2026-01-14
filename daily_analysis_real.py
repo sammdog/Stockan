@@ -634,6 +634,7 @@ def main_pipeline(forecast_days=14):
     models_learned_today = 0
     models_loaded = 0
     
+    # СОХРАНЯЕМ ВСЕ ПАРАМЕТРЫ МОДЕЛЕЙ ДЛЯ ВСЕХ АКЦИЙ
     for sector, secd in data_frames.items():
         models[sector] = {}
         for ticker in sectors[sector]:
@@ -646,11 +647,28 @@ def main_pipeline(forecast_days=14):
                 
                 if os.path.exists(param_file):
                     # Загружаем сохраненные параметры
-                    with open(param_file, 'r') as f:
-                        loaded_params = json.load(f)
-                    model = LGBMRegressor(random_state=1, **loaded_params)
-                    models_loaded += 1
-                    debug_print(f"  ✅ Загружены параметры для {ticker}")
+                    try:
+                        with open(param_file, 'r') as f:
+                            loaded_params = json.load(f)
+                        model = LGBMRegressor(random_state=1, **loaded_params)
+                        models_loaded += 1
+                        debug_print(f"  ✅ Загружены параметры для {ticker}")
+                    except Exception as e:
+                        debug_print(f"  ❌ Ошибка загрузки параметров для {ticker}: {e}")
+                        # Если не удалось загрузить, делаем GridSearch
+                        model = LGBMRegressor(random_state=1)
+                        grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4, verbose=0)
+                        grid_search.fit(X, y)
+                        best_model = grid_search.best_estimator_
+                        model = best_model
+                        best_params = grid_search.best_params_
+                        
+                        # Сохраняем параметры модели
+                        with open(param_file, 'w') as f:
+                            json.dump(best_params, f, indent=2)
+                        
+                        models_learned_today += 1
+                        debug_print(f"  💾 Сохранены параметры для {ticker} (после ошибки загрузки)")
                 else:
                     # Делаем GridSearch для новых моделей
                     debug_print(f"  🔍 Подбираю параметры для {ticker} с помощью GridSearch...")
@@ -691,6 +709,8 @@ def main_pipeline(forecast_days=14):
                     spv[X.columns[i]] += model.feature_importances_[i]
                 
                 models[sector][ticker] = model
+            else:
+                debug_print(f"  ⚠️ {ticker} нет в данных сектора {sector}")
     
     debug_print(f"📊 Загружено моделей: {models_loaded}, обучено новых: {models_learned_today}")
     
@@ -701,9 +721,13 @@ def main_pipeline(forecast_days=14):
     for sector, secd in data_frames.items():
         for ticker in sectors[sector]:
             if ticker in secd and ticker in models.get(sector, {}):
-                last_data = secd[ticker].drop(columns=['target']).iloc[-1].copy()
-                prediction = models[sector][ticker].predict([last_data])
-                predictions[ticker] = float(prediction[0])
+                try:
+                    last_data = secd[ticker].drop(columns=['target']).iloc[-1].copy()
+                    prediction = models[sector][ticker].predict([last_data])
+                    predictions[ticker] = float(prediction[0])
+                except Exception as e:
+                    debug_print(f"  ❌ Ошибка предсказания для {ticker}: {e}")
+                    predictions[ticker] = 0.0
     
     # ========== КЛАССИФИКАЦИЯ РЕЗУЛЬТАТОВ (ТОЧНО КАК В GOOGLE COLAB) ==========
     sr, mn = {}, {}
@@ -739,7 +763,8 @@ def main_pipeline(forecast_days=14):
         "model_stats": {
             "models_loaded": models_loaded,
             "models_learned_today": models_learned_today,
-            "total_models": len(predictions)
+            "total_models": len(predictions),
+            "expected_models": sum(len(tickers) for tickers in sectors.values())
         }
     }
     
@@ -752,6 +777,7 @@ def main_pipeline(forecast_days=14):
     debug_print(f"📊 Средних акций: {len(sr)}")
     debug_print(f"📈 Точность модели: {accuracy:.1f}%")
     debug_print(f"🤖 Моделей: загружено {models_loaded}, обучено новых {models_learned_today}")
+    debug_print(f"📋 Ожидалось моделей: {results_data['model_stats']['expected_models']}")
     
     # Выводим результаты как в Google Colab
     print(f"\n📊 РЕЗУЛЬТАТЫ АНАЛИЗА")
@@ -768,8 +794,9 @@ def main_pipeline(forecast_days=14):
         print('\n100% GOOD DAY')
     
     print(f"\n📊 СРЕДНИЙ ПОТЕНЦИАЛ (отсортировано по убыванию):")
-    for ticker, value in results_data['medium_potential'].items():
-        print(f"  {ticker}: +{value:.1f}%")
+    for i, (ticker, value) in enumerate(results_data['medium_potential'].items()):
+        if i < 30:  # Ограничим вывод
+            print(f"  {ticker}: +{value:.1f}%")
     
     print(f"\n🎯 ВЫСОКИЙ ПОТЕНЦИАЛ (отсортировано по убыванию):")
     for ticker, value in results_data['high_potential'].items():
@@ -825,6 +852,8 @@ def main():
         print(f"🎯 Лучших акций: {results.get('summary', {}).get('high_count', 0)}")
         print(f"📊 Средних акций: {results.get('summary', {}).get('medium_count', 0)}")
         print(f"📈 Точность модели: {results.get('model_accuracy', 0)}%")
+        print(f"🤖 Моделей: загружено {results.get('model_stats', {}).get('models_loaded', 0)}, обучено новых {results.get('model_stats', {}).get('models_learned_today', 0)}")
+        print(f"📋 Ожидалось моделей: {results.get('model_stats', {}).get('expected_models', 0)}")
         
         return results
         
