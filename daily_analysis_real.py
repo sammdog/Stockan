@@ -36,15 +36,13 @@ def save_debug_data(data, filename):
         json.dump(data, f, indent=2, default=str)
     debug_print(f"Сохранены отладочные данные в {filename}")
 
-# ========== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ MOEX ==========
-def fetch_moex_data_paginated(ticker, start_date, end_date, is_index=False, max_days=500):
-    """
-    Загружает данные MOEX с разбивкой на части
-    MOEX API ограничивает 500 строк за запрос
-    """
-    all_data = []
-    current_start = pd.to_datetime(start_date)
-    current_end = pd.to_datetime(end_date)
+# ========== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ MOEX (как в Colab) ==========
+def fetch_moex_data_colab_style(ticker, start_date, end_date, is_index=False):
+    """Загружает данные MOEX так же, как в Google Colab (два запроса)"""
+    debug_print(f"  📥 Загрузка {ticker} (Colab style)...")
+    
+    # Фиксированная дата разбиения, как в Colab
+    split_date = "2024-09-25"
     
     # Определяем тип запроса
     if is_index:
@@ -52,113 +50,90 @@ def fetch_moex_data_paginated(ticker, start_date, end_date, is_index=False, max_
     else:
         url_template = "http://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json?from={start}&till={end}&interval=24"
     
-    attempts = 0
-    max_attempts = 3
+    all_data = []
     
-    while current_start < current_end:
-        part_end = min(current_start + timedelta(days=max_days), current_end)
-        
-        url = url_template.format(
-            ticker=ticker,
-            start=current_start.strftime('%Y-%m-%d'),
-            end=part_end.strftime('%Y-%m-%d')
-        )
-        
-        debug_print(f"  📥 Загрузка {ticker}: {current_start.date()} - {part_end.date()}")
-        
-        success = False
-        for attempt in range(max_attempts):
-            try:
-                response = requests.get(url, timeout=30)
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'candles' in data and 'data' in data['candles'] and data['candles']['data']:
-                        part_data = [{k: r[i] for i, k in enumerate(data['candles']['columns'])} 
-                                   for r in data['candles']['data']]
-                        df_part = pd.DataFrame(part_data)
-                        df_part['begin'] = pd.to_datetime(df_part['begin'])
-                        all_data.append(df_part)
-                        debug_print(f"    ✅ Загружено {len(df_part)} строк")
-                        success = True
-                        break
-                    else:
-                        debug_print(f"    ⚠️ Нет данных (попытка {attempt+1})")
-                else:
-                    debug_print(f"    ⚠️ Ошибка HTTP {response.status_code} (попытка {attempt+1})")
-            except Exception as e:
-                debug_print(f"    ⚠️ Ошибка запроса: {e} (попытка {attempt+1})")
-            
-            if attempt < max_attempts - 1:
-                time.sleep(1)
-        
-        if not success:
-            debug_print(f"    ❌ Не удалось загрузить данные за период {current_start.date()} - {part_end.date()}")
-        
-        current_start = part_end + timedelta(days=1)
+    # Первый запрос: с start_date до split_date
+    url1 = url_template.format(
+        ticker=ticker,
+        start=start_date,
+        end=split_date
+    )
+    
+    debug_print(f"    🔄 Запрос 1: {start_date} - {split_date}")
+    try:
+        response1 = requests.get(url1, timeout=30)
+        if response1.status_code == 200:
+            data1 = response1.json()
+            if 'candles' in data1 and 'data' in data1['candles'] and data1['candles']['data']:
+                part_data = [{k: r[i] for i, k in enumerate(data1['candles']['columns'])} 
+                           for r in data1['candles']['data']]
+                df_part = pd.DataFrame(part_data)
+                df_part['begin'] = pd.to_datetime(df_part['begin'])
+                all_data.append(df_part)
+                debug_print(f"      ✅ Загружено {len(df_part)} строк")
+        else:
+            debug_print(f"      ⚠️ Ошибка HTTP {response1.status_code}")
+    except Exception as e:
+        debug_print(f"      ⚠️ Ошибка запроса: {e}")
+    
+    # Второй запрос: с split_date до end_date
+    url2 = url_template.format(
+        ticker=ticker,
+        start=split_date,
+        end=end_date
+    )
+    
+    debug_print(f"    🔄 Запрос 2: {split_date} - {end_date}")
+    try:
+        response2 = requests.get(url2, timeout=30)
+        if response2.status_code == 200:
+            data2 = response2.json()
+            if 'candles' in data2 and 'data' in data2['candles'] and data2['candles']['data']:
+                part_data = [{k: r[i] for i, k in enumerate(data2['candles']['columns'])} 
+                           for r in data2['candles']['data']]
+                df_part = pd.DataFrame(part_data)
+                df_part['begin'] = pd.to_datetime(df_part['begin'])
+                all_data.append(df_part)
+                debug_print(f"      ✅ Загружено {len(df_part)} строк")
+        else:
+            debug_print(f"      ⚠️ Ошибка HTTP {response2.status_code}")
+    except Exception as e:
+        debug_print(f"      ⚠️ Ошибка запроса: {e}")
     
     if all_data:
         result = pd.concat(all_data, ignore_index=True)
         result = result.sort_values('begin').drop_duplicates('begin')
-        debug_print(f"  📊 Итого по {ticker}: {len(result)} строк, последняя дата: {result['begin'].max().date() if not result.empty else 'нет'}")
+        debug_print(f"    📊 Итого: {len(result)} строк, последняя дата: {result['begin'].max().date() if not result.empty else 'нет'}")
         return result
     else:
-        debug_print(f"  ❌ Нет данных по {ticker}")
+        debug_print(f"    ❌ Нет данных по {ticker}")
         return pd.DataFrame()
 
-def fetch_futures_data_paginated(ticker, start_date, end_date, max_days=500):
-    """Загружает данные фьючерсов с разбивкой на части"""
-    all_data = []
-    current_start = pd.to_datetime(start_date)
-    current_end = pd.to_datetime(end_date)
+def fetch_futures_data_colab_style(ticker, start_date, end_date):
+    """Загружает данные фьючерсов так же, как в Google Colab"""
+    debug_print(f"  📥 Загрузка {ticker} (Colab style)...")
     
-    attempts = 0
-    max_attempts = 3
+    url = f"http://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}/candles.json?from={start_date}&till={end_date}&interval=24"
     
-    while current_start < current_end:
-        part_end = min(current_start + timedelta(days=max_days), current_end)
-        
-        url = f"http://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}/candles.json?from={current_start.strftime('%Y-%m-%d')}&till={part_end.strftime('%Y-%m-%d')}&interval=24"
-        
-        debug_print(f"  📥 Загрузка {ticker}: {current_start.date()} - {part_end.date()}")
-        
-        success = False
-        for attempt in range(max_attempts):
-            try:
-                response = requests.get(url, timeout=30)
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'candles' in data and 'data' in data['candles'] and data['candles']['data']:
-                        part_data = [{k: r[i] for i, k in enumerate(data['candles']['columns'])} 
-                                   for r in data['candles']['data']]
-                        df_part = pd.DataFrame(part_data)
-                        df_part['begin'] = pd.to_datetime(df_part['begin'])
-                        all_data.append(df_part)
-                        debug_print(f"    ✅ Загружено {len(df_part)} строк")
-                        success = True
-                        break
-                    else:
-                        debug_print(f"    ⚠️ Нет данных (попытка {attempt+1})")
-                else:
-                    debug_print(f"    ⚠️ Ошибка HTTP {response.status_code} (попытка {attempt+1})")
-            except Exception as e:
-                debug_print(f"    ⚠️ Ошибка запроса: {e} (попытка {attempt+1})")
-            
-            if attempt < max_attempts - 1:
-                time.sleep(1)
-        
-        if not success:
-            debug_print(f"    ❌ Не удалось загрузить данные за период {current_start.date()} - {part_end.date()}")
-        
-        current_start = part_end + timedelta(days=1)
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            if 'candles' в data and 'data' в data['candles'] and data['candles']['data']:
+                part_data = [{k: r[i] for i, k in enumerate(data['candles']['columns'])} 
+                           for r in data['candles']['data']]
+                df = pd.DataFrame(part_data)
+                df['begin'] = pd.to_datetime(df['begin'])
+                debug_print(f"    ✅ Загружено {len(df)} строк")
+                return df
+            else:
+                debug_print(f"    ⚠️ Нет данных")
+        else:
+            debug_print(f"    ⚠️ Ошибка HTTP {response.status_code}")
+    except Exception as e:
+        debug_print(f"    ⚠️ Ошибка запроса: {e}")
     
-    if all_data:
-        result = pd.concat(all_data, ignore_index=True)
-        result = result.sort_values('begin').drop_duplicates('begin')
-        debug_print(f"  📊 Итого по {ticker}: {len(result)} строк, от {result['begin'].min().date() if not result.empty else 'нет'} до {result['begin'].max().date() if not result.empty else 'нет'}")
-        return result
-    else:
-        debug_print(f"  ❌ Нет данных по {ticker}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 # ========== ФУНКЦИЯ ДОБАВЛЕНИЯ КАПИТАЛИЗАЦИЙ ==========
 def add_cap_columns(df, cap_dict):
@@ -710,7 +685,7 @@ def main_pipeline(forecast_days=14, output_mode="json"):
                 mse_scores = -cv_scores
                 
                 # Запоминаем акции с большим MAE
-                if mse_scores.mean() > 7.5:
+                if mse_scores.mean() > 9:
                     sppa.append(ticker)
                     sppa.append(mse_scores.mean())
                 
