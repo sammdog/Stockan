@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import requests
 from datetime import date, timedelta, datetime
-import matplotlib.pyplot as plt
 import lightgbm
 from lightgbm import LGBMClassifier
 from lightgbm import LGBMRegressor
