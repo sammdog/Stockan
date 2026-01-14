@@ -119,7 +119,7 @@ def fetch_futures_data_colab_style(ticker, start_date, end_date):
         response = requests.get(url, timeout=30)
         if response.status_code == 200:
             data = response.json()
-            if 'candles' в data and 'data' в data['candles'] and data['candles']['data']:
+            if 'candles' in data and 'data' in data['candles'] and data['candles']['data']:
                 part_data = [{k: r[i] for i, k in enumerate(data['candles']['columns'])} 
                            for r in data['candles']['data']]
                 df = pd.DataFrame(part_data)
