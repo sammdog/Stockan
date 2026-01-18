@@ -2,8 +2,10 @@ name: Daily Stock Analysis
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # 11:00 по Москве
+    - cron: '0 7 * * *'  # 10:00 по Москве
+    - cron: '0 10 * * *'
     - cron: '0 13 * * *'
+    - cron: '0 16 * * *'
     - cron: '0 18 * * *'
   workflow_dispatch:
 
