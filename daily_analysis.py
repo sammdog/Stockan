@@ -45,9 +45,9 @@ def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False, retry_
     
     # Определяем базовый URL
     if is_index:
-        base_url = "http://iss.moex.com/iss/engines/stock/markets/index/securities"
+        base_url = "https://iss.moex.com/iss/engines/stock/markets/index/securities"
     else:
-        base_url = "http://iss.moex.com/iss/engines/stock/markets/shares/securities"
+        base_url = "https://iss.moex.com/iss/engines/stock/markets/shares/securities"
     
     # Фиксированная дата разбивки как в Google Colab
     split_date = '2024-09-25'
@@ -82,7 +82,7 @@ def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False, retry_
                     debug_print(f"      ⚠️ Нет данных в первой части")
                     break
             else:
-                debug_print(f"      ⚠️ Ошибка HTTP {response1.status_code} в первой части (попытка {attempt+1}/{retry_count})")
+                debug_print(f"      ⚠️ Ошибка https {response1.status_code} в первой части (попытка {attempt+1}/{retry_count})")
                 if attempt < retry_count - 1:
                     time.sleep(random.uniform(2, 5))  # Случайная задержка между попытками
         except Exception as e:
@@ -113,7 +113,7 @@ def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False, retry_
                     debug_print(f"      ⚠️ Нет данных во второй части")
                     break
             else:
-                debug_print(f"      ⚠️ Ошибка HTTP {response2.status_code} во второй части (попытка {attempt+1}/{retry_count})")
+                debug_print(f"      ⚠️ Ошибка https {response2.status_code} во второй части (попытка {attempt+1}/{retry_count})")
                 if attempt < retry_count - 1:
                     time.sleep(random.uniform(2, 5))
         except Exception as e:
@@ -137,7 +137,7 @@ def fetch_futures_data_colab(ticker, start_date, end_date, retry_count=3):
     """
     debug_print(f"  📥 Загрузка фьючерса {ticker} (метод Colab)...")
     
-    url = f"http://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}/candles.json?from={start_date}&till={end_date}&interval=24"
+    url = f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}/candles.json?from={start_date}&till={end_date}&interval=24"
     
     # Добавляем User-Agent и заголовки для обхода блокировок
     headers = {
@@ -164,7 +164,7 @@ def fetch_futures_data_colab(ticker, start_date, end_date, retry_count=3):
                     debug_print(f"  ⚠️ Нет данных по фьючерсу {ticker}")
                     return pd.DataFrame()
             else:
-                debug_print(f"  ⚠️ Ошибка HTTP {response.status_code} для {ticker} (попытка {attempt+1}/{retry_count})")
+                debug_print(f"  ⚠️ Ошибка https {response.status_code} для {ticker} (попытка {attempt+1}/{retry_count})")
                 if attempt < retry_count - 1:
                     time.sleep(random.uniform(2, 5))
         except Exception as e:
@@ -190,7 +190,7 @@ def add_cap_columns(df, cap_dict):
 # ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ USD ==========
 def get_currency_rate(date, retry_count=3):
     """Получает курс доллара на указанную дату"""
-    url = f'https://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
+    url = f'httpss://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -384,7 +384,18 @@ def main_pipeline(forecast_days=14):
     debug_print(f"📅 Стартовая дата для данных: {startpars}")
     debug_print(f"📊 Количество секторов для индексов: {len(sectorsi)}")
     debug_print(f"📊 Количество секторов для акций: {len(sectors)}")
+        # Добавьте в начало main_pipeline():
+    def check_moex():
+         try:
+            requests.get("httpss://iss.moex.com/iss/engines/stock/markets/shares/securities/SBER/candles.json?from=2024-01-01&till=2024-01-02&interval=24", 
+                        timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+            return True
+         except:
+            return False
     
+     if not check_moex():
+        print("❌ MOEX ISS API недоступен. Проверьте соединение или IP-адрес.")
+        sys.exit(1)
     # ========== ЗАГРУЗКА ИНДЕКСОВ СЕКТОРОВ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("🔧 Загружаю и рассчитываю индексы секторов...")
     ind = {}
