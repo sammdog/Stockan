@@ -34,6 +34,22 @@ def save_debug_data(data, filename):
         json.dump(data, f, indent=2, default=str)
     debug_print(f"Сохранены отладочные данные в {filename}")
 
+import socket
+
+def check_moex_connectivity():
+    """Проверяет, доступен ли MOEX ISS API."""
+    test_url = "https://iss.moex.com/iss/engines/stock/markets/shares/securities/SBER/candles.json?from=2024-01-01&till=2024-01-02&interval=24"
+    try:
+        r = requests.get(test_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+        if r.status_code == 200:
+            return True
+    except Exception as e:
+        print(f"❌ MOEX API недоступен: {e}")
+        return False
+    return False
+
+
+
 # ========== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ MOEX (ТОЧНО КАК В GOOGLE COLAB) ==========
 def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False):
     """
@@ -43,9 +59,9 @@ def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False):
     
     # Определяем базовый URL
     if is_index:
-        base_url = "http://iss.moex.com/iss/engines/stock/markets/index/securities"
+        base_url = "https://iss.moex.com/iss/engines/stock/markets/index/securities"
     else:
-        base_url = "http://iss.moex.com/iss/engines/stock/markets/shares/securities"
+        base_url = "https://iss.moex.com/iss/engines/stock/markets/shares/securities"
     
     # Фиксированная дата разбивки как в Google Colab
     split_date = '2024-09-25'
@@ -69,7 +85,7 @@ def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False):
             else:
                 debug_print(f"      ⚠️ Нет данных в первой части")
         else:
-            debug_print(f"      ⚠️ Ошибка HTTP {response1.status_code} в первой части")
+            debug_print(f"      ⚠️ Ошибка https {response1.status_code} в первой части")
     except Exception as e:
         debug_print(f"      ❌ Ошибка запроса 1: {e}")
     
@@ -90,7 +106,7 @@ def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False):
             else:
                 debug_print(f"      ⚠️ Нет данных во второй части")
         else:
-            debug_print(f"      ⚠️ Ошибка HTTP {response2.status_code} во второй части")
+            debug_print(f"      ⚠️ Ошибка https {response2.status_code} во второй части")
     except Exception as e:
         debug_print(f"      ❌ Ошибка запроса 2: {e}")
     
@@ -110,7 +126,7 @@ def fetch_futures_data_colab(ticker, start_date, end_date):
     """
     debug_print(f"  📥 Загрузка фьючерса {ticker} (метод Colab)...")
     
-    url = f"http://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}/candles.json?from={start_date}&till={end_date}&interval=24"
+    url = f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}/candles.json?from={start_date}&till={end_date}&interval=24"
     
     try:
         response = requests.get(url, timeout=30)
@@ -127,7 +143,7 @@ def fetch_futures_data_colab(ticker, start_date, end_date):
             else:
                 debug_print(f"  ⚠️ Нет данных по фьючерсу {ticker}")
         else:
-            debug_print(f"  ⚠️ Ошибка HTTP {response.status_code} для {ticker}")
+            debug_print(f"  ⚠️ Ошибка https {response.status_code} для {ticker}")
     except Exception as e:
         debug_print(f"  ❌ Ошибка запроса {ticker}: {e}")
     
@@ -149,7 +165,7 @@ def add_cap_columns(df, cap_dict):
 # ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ USD ==========
 def get_currency_rate(date):
     """Получает курс доллара на указанную дату"""
-    url = f'https://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
+    url = f'httpss://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
@@ -226,7 +242,9 @@ def main_pipeline(forecast_days=14):
     Точная копия логики Google Colab
     """
     debug_print(f"🚀 Начинаю полный анализ (метод Google Colab)...")
-    
+    # В самом начале main() или main_pipeline() добавить:
+    if not check_moex_connectivity():
+        raise SystemExit("Критическая ошибка: не удаётся подключиться к MOEX ISS API. Работа остановлена.")
     # === КОНФИГУРАЦИЯ КАПИТАЛИЗАЦИЙ ===
     cap = {
         'IMOEX2': {
