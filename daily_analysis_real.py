@@ -38,7 +38,7 @@ import socket
 
 def check_moex_connectivity():
     """Проверяет, доступен ли MOEX ISS API."""
-    test_url = "https://iss.moex.com/iss/engines/stock/markets/shares/securities/SBER/candles.json?from=2024-01-01&till=2024-01-02&interval=24"
+    test_url = "https://iss.moex.com/iss/engines/stock/markets/shares/securities/SBER/candles.json?from=2024-01-01&till=2024-01-04&interval=24"
     try:
         r = requests.get(test_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
         if r.status_code == 200:
