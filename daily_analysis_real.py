@@ -165,7 +165,7 @@ def add_cap_columns(df, cap_dict):
 # ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ USD ==========
 def get_currency_rate(date):
     """Получает курс доллара на указанную дату"""
-    url = f'httpss://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
+    url = f'https://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
