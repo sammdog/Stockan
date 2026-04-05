@@ -1,0 +1,2 @@
+This ML-model analysis and predict rus stock market. Uploading results on a google disk for future using.
+Model uses different info from moex api, such as usd exchange rate, stocks cost, sales volume etc. For predictions were manually selected 100 stocks with high accuracy and acceptable for average person lot price. Every day new data is added to the dataset. Results of prediction are used for telegram-bot, for easier access.
