@@ -50,68 +50,63 @@ def check_moex_connectivity():
 
 
 
-# ========== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ MOEX (ТОЧНО КАК В GOOGLE COLAB) ==========
+# ========== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ MOEX новая от 02.11.2026 ==========
 def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False):
     """
-    Загружает данные MOEX точно как в Google Colab: два запроса с фиксированной датой 2024-09-25
+    Загружает данные MOEX с помощью постраничной загрузки (пагинации),
+    чтобы обойти ограничения API на размер ответа.
     """
-    debug_print(f"  📥 Загрузка {ticker} (метод Colab)...")
+    debug_print(f"  📥 Загрузка {ticker} (метод Colab с пагинацией)...")
     
-    # Определяем базовый URL
     if is_index:
         base_url = "https://iss.moex.com/iss/engines/stock/markets/index/securities"
     else:
         base_url = "https://iss.moex.com/iss/engines/stock/markets/shares/securities"
     
-    # Фиксированная дата разбивки как в Google Colab
-    split_date = '2024-09-25'
-    
     all_data = []
+    start_row = 0
+    limit_rows = 500  # Оптимальный размер страницы, чтобы не превышать лимиты
     
-    # Первый запрос: от start_date до 2024-09-25
-    url1 = f"{base_url}/{ticker}/candles.json?from={start_date}&till={split_date}&interval=24"
-    debug_print(f"    🔄 Запрос 1: {start_date} - {split_date}")
-    
-    try:
-        response1 = requests.get(url1, timeout=30)
-        if response1.status_code == 200:
-            data1 = response1.json()
-            if 'candles' in data1 and 'data' in data1['candles'] and data1['candles']['data']:
-                part_data1 = [{k: r[i] for i, k in enumerate(data1['candles']['columns'])} 
-                            for r in data1['candles']['data']]
-                df1 = pd.DataFrame(part_data1)
-                all_data.append(df1)
-                debug_print(f"      ✅ Загружено {len(df1)} строк")
+    while True:
+        # Формируем URL с параметрами начала и лимита строк
+        url = f"{base_url}/{ticker}/candles.json?from={start_date}&till={end_date}&interval=24&start={start_row}&limit={limit_rows}"
+        debug_print(f"    🔄 Запрос строк {start_row} - {start_row + limit_rows}...")
+        
+        try:
+            response = requests.get(url, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Проверяем наличие данных в ответе
+                if 'candles' in data and 'data' in data['candles'] and data['candles']['data']:
+                    part_data = [{k: r[i] for i, k in enumerate(data['candles']['columns'])} 
+                                 for r in data['candles']['data']]
+                    df_part = pd.DataFrame(part_data)
+                    all_data.append(df_part)
+                    debug_print(f"      ✅ Получено {len(df_part)} строк")
+                    
+                    # Если вернулось строк меньше лимита, значит, это была последняя страница
+                    if len(df_part) < limit_rows:
+                        debug_print(f"    🏁 Достигнут конец данных для {ticker}.")
+                        break
+                    
+                    # Увеличиваем счетчик для следующей страницы
+                    start_row += limit_rows
+                else:
+                    debug_print(f"    🏁 Нет данных на странице {start_row}. Завершаю.")
+                    break
             else:
-                debug_print(f"      ⚠️ Нет данных в первой части")
-        else:
-            debug_print(f"      ⚠️ Ошибка https {response1.status_code} в первой части")
-    except Exception as e:
-        debug_print(f"      ❌ Ошибка запроса 1: {e}")
+                debug_print(f"    ❌ Ошибка HTTP {response.status_code} на странице {start_row}")
+                break
+                
+        except Exception as e:
+            debug_print(f"    ❌ Ошибка запроса на странице {start_row}: {e}")
+            break
     
-    # Второй запрос: от 2024-09-25 до end_date
-    url2 = f"{base_url}/{ticker}/candles.json?from={split_date}&till={end_date}&interval=24"
-    debug_print(f"    🔄 Запрос 2: {split_date} - {end_date}")
-    
-    try:
-        response2 = requests.get(url2, timeout=30)
-        if response2.status_code == 200:
-            data2 = response2.json()
-            if 'candles' in data2 and 'data' in data2['candles'] and data2['candles']['data']:
-                part_data2 = [{k: r[i] for i, k in enumerate(data2['candles']['columns'])} 
-                            for r in data2['candles']['data']]
-                df2 = pd.DataFrame(part_data2)
-                all_data.append(df2)
-                debug_print(f"      ✅ Загружено {len(df2)} строк")
-            else:
-                debug_print(f"      ⚠️ Нет данных во второй части")
-        else:
-            debug_print(f"      ⚠️ Ошибка https {response2.status_code} во второй части")
-    except Exception as e:
-        debug_print(f"      ❌ Ошибка запроса 2: {e}")
-    
+    # Объединяем все загруженные части
     if all_data:
         result = pd.concat(all_data, ignore_index=True)
+        # Удаляем дубликаты по дате (на случай стыковки страниц)
         result['begin'] = pd.to_datetime(result['begin'])
         result = result.sort_values('begin').drop_duplicates('begin')
         debug_print(f"  📊 Итого по {ticker}: {len(result)} строк, последняя дата: {result['begin'].max().date() if not result.empty else 'нет'}")
