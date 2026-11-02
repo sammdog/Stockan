@@ -19,19 +19,21 @@ jobs:
     steps:
     - name: 📥 Checkout code
       uses: actions/checkout@v4
-    
+      
+    - name: 📦 Кэширование данных (usd_data.json и model_params)
+      uses: actions/cache@v4
+      with:
+        path: |
+          usd_data.json
+          model_params
+        key: ${{ runner.os }}-state-cache-${{ github.run_id }}
+        restore-keys: |
+          ${{ runner.os }}-state-cache-
+          
     - name: 🐍 Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-        
-    - name: 📦 Кэширование параметров моделей
-      uses: actions/cache@v3
-      with:
-        path: model_params
-        key: ${{ runner.os }}-model-params-${{ hashFiles('daily_analysis_real.py') }}
-        restore-keys: |
-          ${{ runner.os }}-model-params-
     
     - name: 📦 Install dependencies
       run: |
