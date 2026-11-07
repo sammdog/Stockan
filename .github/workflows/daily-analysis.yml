@@ -11,7 +11,11 @@ on:
     - cron: '0 18 * * *'
     - cron: '0 21 * * *'
   workflow_dispatch:
-
+  
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+  
 jobs:
   analyze:
     runs-on: ubuntu-latest
