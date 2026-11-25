@@ -91,7 +91,7 @@ def summarize(results):
     return metrics
 
 
-def audit(data_frames, horizon, index_sources, index_dates, candles, as_of):
+def audit(data_frames, horizon, index_sources, index_dates, candles, as_of, actual_index):
     all_results = []
     for cutoff, end in zip(FOLD_BOUNDARIES[:-1], FOLD_BOUNDARIES[1:]):
         indices = refit_indices(index_sources, cutoff, end)
@@ -157,7 +157,7 @@ def audit(data_frames, horizon, index_sources, index_dates, candles, as_of):
 
     from tools.portfolio_backtest import audit_portfolios
 
-    audit_portfolios(results, candles, as_of)
+    audit_portfolios(results, candles, as_of, actual_index)
 
 
 def print_report(period, results):

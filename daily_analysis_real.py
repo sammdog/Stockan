@@ -507,7 +507,7 @@ def main_pipeline(forecast_days=14):
                 continue
             
             if walk_forward:
-                audit_candles[ticker] = df[["begin", "low", "high", "close"]].copy()
+                audit_candles[ticker] = df[["begin", "low", "high", "close", "open"]].copy()
             df = df[['begin', 'close', 'volume']].rename(columns={'close': 'ticker'})
             
             # Проверяем, что есть достаточно данных
@@ -598,7 +598,10 @@ def main_pipeline(forecast_days=14):
     if walk_forward:
         from tools.walk_forward import audit
 
-        audit(data_frames, forecast_days, index_sources, index_dates, audit_candles, today)
+        actual_index = fetch_shares_data_colab("IMOEX", startpars, today.isoformat(), is_index=True)
+        if actual_index.empty:
+            raise RuntimeError("IMOEX history unavailable for trading rules")
+        audit(data_frames, forecast_days, index_sources, index_dates, audit_candles, today, actual_index)
         raise SystemExit(0)
 
     # ========== ОБУЧЕНИЕ МОДЕЛЕЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
