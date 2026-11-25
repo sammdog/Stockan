@@ -2,6 +2,7 @@
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
@@ -90,7 +91,72 @@ def fetch_report(file_id):
     return data
 
 
-def format_candidates(report):
+def intraday_quote(ticker, now):
+    response = requests.get(
+        f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{ticker}/candles.json",
+        params={"from": now.date().isoformat(), "till": now.date().isoformat(),
+                "interval": 10, "iss.only": "candles", "candles.columns": "close,end"},
+        verify="certs/moex-ca.pem", timeout=6, allow_redirects=False,
+    )
+    response.raise_for_status()
+    block = response.json()["candles"]
+    columns = block["columns"]
+    bars = []
+    for row in block["data"]:
+        close = Decimal(str(row[columns.index("close")]))
+        end = datetime.fromisoformat(row[columns.index("end")]).replace(tzinfo=MSK)
+        if end.date() == now.date() and end <= now and close.is_finite() and close > 0:
+            bars.append((end, close))
+    if not bars:
+        return None
+    bars.sort()
+    end, close = bars[-1]
+    previous = next((price for stamp, price in reversed(bars)
+                     if timedelta(minutes=30) <= end - stamp <= timedelta(minutes=35)), None)
+    return end, close, previous
+
+
+def quote_context(items, now=None):
+    now = now or datetime.now(MSK)
+    tickers = {item["ticker"] for item in items}
+    if not tickers:
+        return {}
+
+    def fetch(ticker):
+        try:
+            return ticker, intraday_quote(ticker, now)
+        except (requests.RequestException, OSError, ArithmeticError, ValueError, KeyError, TypeError, IndexError):
+            logging.info("Could not load intraday MOEX candles for %s", ticker)
+            return ticker, None
+
+    with ThreadPoolExecutor(max_workers=min(5, len(tickers))) as pool:
+        return dict(pool.map(fetch, tickers))
+
+
+def format_quote(item, quote, now=None):
+    if not quote:
+        return "  MOEX: свежая свеча недоступна."
+    now = now or datetime.now(MSK)
+    stamp, close, previous = quote
+    text = f"  MOEX: {close} ₽ · свеча до {stamp:%H:%M} МСК"
+    if stamp.date() != now.date() or now - stamp > timedelta(minutes=30):
+        return text + " · данные с задержкой."
+    reference = Decimal(str(item["reference_close"]))
+    from_close = (close / reference - 1) * 100
+    recent = (close / previous - 1) * 100 if previous else None
+    text += f" · к закрытию отчёта {from_close:+.2f}%"
+    if recent is not None:
+        text += f" · за 30 мин {recent:+.2f}%"
+    if close <= Decimal(item["buy_limit"]):
+        text += "\n  Цена свечи в пределах лимита."
+        if from_close <= -2 or (recent is not None and recent <= -1):
+            text += " ⚠️ Заметное снижение, проверь стакан и движение."
+    else:
+        text += "\n  Цена свечи выше лимита."
+    return text
+
+
+def format_candidates(report, quotes=None):
     lines = ["Рекомендации Stockan"]
     if "trade_candidates" not in report:
         leaders = sorted(report.get("predictions", {}).items(),
@@ -108,6 +174,8 @@ def format_candidates(report):
             f"  Покупка до {item['buy_limit']} ₽ за акцию · {item['lot_size']} шт. в лоте",
             f"  Оценка заявки {item['expected_order_return_pct']:+.2f}% · тейк +{item['take_profit_pct']:g}% от исполнения",
         ))
+        if quotes is not None:
+            lines.append(format_quote(item, quotes.get(item["ticker"])))
     if report.get("missing_trade_metadata"):
         lines.append("Без данных о лоте: " + ", ".join(report["missing_trade_metadata"]))
     return "\n".join(lines)
@@ -148,7 +216,7 @@ def build_bot(token, file_id, owner_id):
                 text = (f"Отчёт: {stamp:%d.%m.%Y %H:%M} МСК · {age:.1f} ч назад\n"
                         f"Свеча: {report.get('signal_date', 'неизвестно')}\nПользователей: {users}")
             else:
-                text = format_candidates(report)
+                text = format_candidates(report, quote_context(report.get("trade_candidates", [])))
             bot.reply_to(message, text)
         except (requests.RequestException, OSError, ValueError, KeyError, TypeError):
             logging.exception("Could not load Stockan report")
@@ -182,10 +250,12 @@ def build_bot(token, file_id, owner_id):
             bot.reply_to(message, "Не удалось рассчитать список заявок по этому отчёту.")
             return
         lines = [f"Бюджет: {capital:,.2f} ₽ · свеча: {report['signal_date']}"]
+        quotes = quote_context([order[0] for order in orders])
         for item, lots, shares, total in orders:
             lines.append(f"• {item['ticker']} · {item['name']}\n"
                          f"  {lots} лот. ({shares} шт.) × {item['buy_limit']} ₽ за акцию\n"
                          f"  {total:,.2f} ₽ с комиссией · тейк +{item['take_profit_pct']:g}% от исполнения")
+            lines.append(format_quote(item, quotes.get(item["ticker"])))
         if orders:
             expected = sum((Decimal(o[0]["buy_limit"]) * o[2] *
                             Decimal(str(o[0]["expected_order_return_pct"])) / 100 for o in orders), Decimal(0))
