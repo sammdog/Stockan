@@ -56,23 +56,6 @@ jobs:
         ls -la
         
         echo ""
-        echo "🔍 Проверяю наличие usd_data.json..."
-        if [ -f "usd_data.json" ]; then
-          echo "✅ Файл usd_data.json найден"
-          echo "📏 Размер: $(wc -c < usd_data.json) байт"
-          echo "📄 Первые 100 символов:"
-          head -c 100 usd_data.json
-          echo ""
-        else
-          echo "❌ Файл usd_data.json НЕ НАЙДЕН"
-          echo "📋 Что сделать:"
-          echo "  1. Запустите анализ в Colab"
-          echo "  2. Скачайте usd_github_backup.json"
-          echo "  3. Загрузите в репозиторий как usd_data.json"
-          exit 1
-        fi
-        
-        echo ""
         echo "🔍 Проверяю наличие daily_analysis_real.py..."
         if [ -f "daily_analysis_real.py" ]; then
           echo "✅ Файл daily_analysis_real.py найден"
@@ -111,7 +94,7 @@ jobs:
         echo "🚨 АНАЛИЗ ПРОВАЛЕН!"
         echo ""
         echo "📋 Возможные причины:"
-        echo "   1. Отсутствует файл usd_data.json"
+        echo "   1. Недоступна история курса USD"
         echo "   2. Ошибка в коде анализа"
         echo "   3. MOEX API недоступен"
         echo "   4. Проблемы с зависимостями"
