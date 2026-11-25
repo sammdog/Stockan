@@ -493,11 +493,6 @@ def main_pipeline(forecast_days=14):
     debug_print("💵 Загружаю и обновляю данные по USD...")
     usd = load_usd_history(date.fromisoformat(startpars), today)
 
-    if walk_forward:
-        from tools.walk_forward import historical_usd
-
-        usd = historical_usd(startpars, today)
-
     # ========== ОБРАБОТКА ДАННЫХ АКЦИЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("📊 Обрабатываю данные по акциям...")
     data_framest = {}

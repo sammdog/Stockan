@@ -17,7 +17,7 @@ on:
         type: boolean
         default: false
       walk_forward:
-        description: Compare three forecast methods on historical quarterly splits
+        description: Compare forecast methods on historical quarterly splits
         type: boolean
         default: false
   
