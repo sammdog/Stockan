@@ -32,29 +32,52 @@ def parse_capital(text):
     return capital
 
 
+def ticker_cap(expected_pct):
+    if expected_pct >= Decimal("1"):
+        return Decimal("2500")
+    if expected_pct >= Decimal("0.5"):
+        return Decimal("2000")
+    return Decimal("1500")
+
+
 def allocate(report, capital):
-    remaining = capital
-    cap = Decimal(str(report["trade_notional_cap_rub"]))
+    """Choose whole-lot orders that maximize estimated rubles per submission."""
     fee = Decimal(str(report["trade_fee_bps"])) / 10_000
-    orders = []
+    # Reserve each order rounded up to the ruble for the optimizer; invoice in kopecks.
+    budget = int(capital)
+    frontier = {0: (Decimal(0), ())}
     for item in report["trade_candidates"]:
         lot_size = int(item["lot_size"])
         lot_price = Decimal(item["buy_limit"]) * lot_size
-        if lot_size <= 0 or lot_price <= 0:
-            raise ValueError("В отчёте неверный размер или цена лота")
-        lots = min(int(cap // lot_price), int(remaining // (lot_price * (1 + fee))))
-        if lots <= 0:
+        edge = Decimal(str(item["expected_order_return_pct"]))
+        if lot_size <= 0 or not lot_price.is_finite() or lot_price <= 0 or not edge.is_finite():
+            raise ValueError("В отчёте неверные параметры заявки")
+        if edge <= 0:
             continue
-        notional = lot_price * lots
-        total = notional + (notional * fee).quantize(CENT, rounding=ROUND_CEILING)
-        if total > remaining:
-            lots -= 1
-            if lots <= 0:
-                continue
+        cap = ticker_cap(edge)
+        max_lots = min(int(cap // lot_price), int(capital // (lot_price * (1 + fee))))
+        by_cost = {}
+        for lots in range(1, max_lots + 1):
             notional = lot_price * lots
-            total = notional + (notional * fee).quantize(CENT, rounding=ROUND_CEILING)
-        remaining -= total
-        orders.append((item, lots, lot_size * lots, total))
+            charge = (notional * fee).quantize(CENT, rounding=ROUND_CEILING)
+            total = notional + charge
+            reserve = int(total.to_integral_value(rounding=ROUND_CEILING))
+            if reserve <= budget:
+                by_cost[reserve] = (notional * edge / 100, (item, lots, lot_size * lots, total))
+        next_states = frontier.copy()
+        for spent, (profit, orders) in frontier.items():
+            for reserve, (extra_profit, order) in by_cost.items():
+                now = spent + reserve
+                if now <= budget and (now not in next_states or profit + extra_profit > next_states[now][0]):
+                    next_states[now] = (profit + extra_profit, (*orders, order))
+        frontier = {}
+        best = Decimal("-1")
+        for spent, state in sorted(next_states.items()):
+            if state[0] > best:
+                frontier[spent] = state
+                best = state[0]
+    _, orders = next(reversed(frontier.values()))
+    remaining = capital - sum((order[3] for order in orders), Decimal(0))
     return orders, remaining
 
 
@@ -164,6 +187,10 @@ def build_bot(token, file_id, owner_id):
             lines.append(f"• {item['ticker']} · {item['name']}\n"
                          f"  {lots} лот. ({shares} шт.) × {item['buy_limit']} ₽ за акцию\n"
                          f"  {total:,.2f} ₽ с комиссией · тейк +{item['take_profit_pct']:g}% от исполнения")
+        if orders:
+            expected = sum((Decimal(o[0]["buy_limit"]) * o[2] *
+                            Decimal(str(o[0]["expected_order_return_pct"])) / 100 for o in orders), Decimal(0))
+            lines.append(f"Оценка результата всех заявок: {expected:+,.2f} ₽")
         if not orders:
             lines.append("Нет заявок, проходящих фильтр и бюджет на целый лот.")
         lines.append(f"Свободный остаток: {remaining:,.2f} ₽")

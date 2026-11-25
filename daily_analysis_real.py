@@ -601,7 +601,6 @@ def main_pipeline(forecast_days=14):
         "trade_plan_block": trade_plan_block,
         "missing_trade_metadata": sorted(eligible - metadata.keys()),
         "trade_fee_bps": 5,
-        "trade_notional_cap_rub": 1000,
     }
     with open("latest_results.json", "w", encoding="utf-8") as f:
         json.dump(results_data, f, ensure_ascii=False, indent=2, allow_nan=False)
