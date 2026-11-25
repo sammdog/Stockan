@@ -1,8 +1,6 @@
 name: Daily Stock Analysis
 
 on:
-  push:
-    branches: [research/risk-exits]
   schedule:
     - cron: '0 0 * * *'
     - cron: '0 3 * * *'
@@ -76,14 +74,14 @@ jobs:
         GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
       run: |
         echo "🚀 Запускаю ПОЛНЫЙ анализ из daily_analysis_real.py..."
-        if [ "${{ (inputs.walk_forward || github.event_name == 'push') }}" = "true" ]; then
+        if [ "${{ inputs.walk_forward }}" = "true" ]; then
           STOCKAN_WALK_FORWARD=1 python daily_analysis_real.py
         else
           python daily_analysis_real.py
         fi
     
     - name: Archive forecast for backtesting
-      if: (inputs.walk_forward || github.event_name == 'push') != true
+      if: inputs.walk_forward != true
       uses: actions/upload-artifact@v4
       with:
         name: stockan-forecast
@@ -91,7 +89,7 @@ jobs:
         if-no-files-found: error
 
     - name: Archive walk-forward results
-      if: (inputs.walk_forward || github.event_name == 'push') == true
+      if: inputs.walk_forward == true
       uses: actions/upload-artifact@v4
       with:
         name: stockan-walk-forward
@@ -104,7 +102,7 @@ jobs:
         if-no-files-found: error
 
     - name: ☁️ Загрузка результатов на Google Drive
-      if: success() && github.ref == 'refs/heads/main' && inputs.validate_only != true && (inputs.walk_forward || github.event_name == 'push') != true
+      if: success() && github.ref == 'refs/heads/main' && inputs.validate_only != true && inputs.walk_forward != true
       env:
         GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
         GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
