@@ -15,7 +15,7 @@ from lightgbm import LGBMRegressor
 from sklearn.model_selection import GridSearchCV, cross_val_score
 import warnings
 import xml.etree.ElementTree as ET
-import time
+from io import StringIO
 
 # ========== КОНФИГУРАЦИЯ И ПРЕДУПРЕЖДЕНИЯ ==========
 def warn(*args, **kwargs):
@@ -166,21 +166,60 @@ def add_cap_columns(df, cap_dict):
     return df
 
 # ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ USD ==========
-def get_currency_rate(date):
-    """Получает курс доллара на указанную дату"""
-    url = f'https://www.cbr.ru/scripts/XML_daily.asp?date_req={date.strftime("%d/%m/%Y")}'
+def fetch_usd_history(start, end):
+    """Load official USD rates by effective date."""
+    response = requests.get(
+        "https://www.cbr.ru/scripts/XML_dynamic.asp",
+        params={
+            "date_req1": (start - timedelta(days=31)).strftime("%d/%m/%Y"),
+            "date_req2": end.strftime("%d/%m/%Y"),
+            "VAL_NM_RQ": "R01235",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    rates = pd.Series({
+        pd.to_datetime(record.attrib["Date"], format="%d.%m.%Y"):
+        float(record.findtext("Value").replace(",", ".")) / int(record.findtext("Nominal"))
+        for record in ET.fromstring(response.content).findall("Record")
+    }, dtype=float).sort_index()
+    if (rates.empty or rates.index.min().date() > start
+            or rates.index.max().date() < end - timedelta(days=MAX_INPUT_AGE_DAYS)
+            or not (np.isfinite(rates) & (rates > 0)).all()):
+        raise ValueError("CBR returned incomplete or invalid USD history")
+
+    daily = rates.reindex(pd.date_range(start, end), method="ffill")
+    return daily.rename("usdt").rename_axis("begin").reset_index()
+
+
+def load_usd_history(start, end, cache_path=Path("usd_data.json")):
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            for valute in root.findall('Valute'):
-                char_code = valute.find('CharCode').text
-                if char_code == 'USD':
-                    value = valute.find('Value').text
-                    return float(value.replace(',', '.'))
-    except Exception as e:
-        debug_print(f"Ошибка при запросе курса на {date.strftime('%d/%m/%Y')}: {e}")
-    return None
+        usd = fetch_usd_history(start, end)
+    except (requests.RequestException, ET.ParseError, ValueError, KeyError, TypeError,
+            AttributeError) as exc:
+        debug_print(f"CBR USD history unavailable: {exc}")
+        try:
+            # Accept both legacy pandas JSON layouts, wrapped in a JSON string.
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached = pd.read_json(StringIO(payload))
+            cached["begin"] = pd.to_datetime(cached["begin"], format="ISO8601")
+            cached = cached.set_index("begin")["usdt"].sort_index()
+            cached = cached.loc[pd.Timestamp(start):pd.Timestamp(end)]
+            expected = pd.date_range(start, cached.index.max()) if not cached.empty else None
+            if (expected is None or not cached.index.equals(expected)
+                    or cached.index.max().date() < end - timedelta(days=MAX_INPUT_AGE_DAYS)
+                    or not (np.isfinite(cached) & (cached > 0)).all()):
+                raise ValueError("cache is stale or has missing USD dates")
+        except (OSError, ValueError, KeyError, TypeError) as cache_error:
+            raise RuntimeError(f"No usable USD history: {cache_error}") from exc
+        debug_print(f"Using complete USD cache through {cached.index.max().date()}")
+        return cached.rename_axis("begin").reset_index()
+
+    cache_path.write_text(json.dumps(usd.to_json(date_format="iso", orient="records")),
+                          encoding="utf-8")
+    debug_print(f"USD history (CBR): {len(usd)} dates from {start} to {end}")
+    return usd
+
 
 # Preserve the historical series through the final trading date of BRJ6.
 BRENT_ROLL_START = date(2026, 4, 2)
@@ -452,57 +491,7 @@ def main_pipeline(forecast_days=14):
 
     # ========== ЗАГРУЗКА И ОБНОВЛЕНИЕ USD ДАННЫХ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("💵 Загружаю и обновляю данные по USD...")
-    file_pa = 'usd_data.json'
-    
-    try:
-        with open(file_pa, 'r') as f:
-            usdtt = pd.read_json(json.load(f))
-        usdtt["begin"] = pd.to_datetime(usdtt["begin"], format="ISO8601")
-        usdtt = usdtt.dropna(subset=["begin", "usdt"])
-        debug_print(f"💾 Кэш USD: {len(usdtt)} строк")
-    except Exception as e:
-        debug_print(f"⚠️ Ошибка загрузки usd_data.json: {e}")
-        usdtt = pd.DataFrame(columns=["begin", "usdt"])
-
-    start_date = usdtt["begin"].max().date() if not usdtt.empty else today - timedelta(days=30)
-
-    end_date = today
-    
-    usd_rates = {}
-    current_date = start_date + timedelta(days=1)
-    max_retries = 3
-    
-    debug_print(f"📅 Загружаю данные USD с {current_date} по {end_date}")
-    
-    while current_date <= end_date:
-        rate = None
-        for attempt in range(max_retries):
-            try:
-                rate = get_currency_rate(current_date)
-                if rate is not None:
-                    usd_rates[current_date.strftime("%d/%m/%Y")] = rate
-                    debug_print(f"✅ Курс на {current_date}: {rate}")
-                    break
-                else:
-                    debug_print(f"⚠️ Попытка {attempt+1}: курс на {current_date} не получен")
-            except Exception as e:
-                debug_print(f"⚠️ Ошибка при запросе {current_date} (попытка {attempt+1}): {e}")
-            time.sleep(0.5)
-        
-        if rate is None:
-            debug_print(f"❌ Не удалось получить курс на {current_date} после {max_retries} попыток")
-        
-        current_date += timedelta(days=1)
-    
-    usd = usdtt
-    if usd_rates:
-        usd_new = pd.DataFrame(list(usd_rates.items()), columns=["begin", "usdt"])
-        usd_new["begin"] = pd.to_datetime(usd_new["begin"], format="%d/%m/%Y")
-        usd = pd.concat([usdtt, usd_new], ignore_index=True).drop_duplicates("begin", keep="last")
-
-    with open(file_pa, "w") as f:
-        json.dump(usd.to_json(date_format="iso", orient="records"), f)
-    debug_print(f"💾 Файл USD сохранён: {len(usd)} строк, последняя дата {usd['begin'].max()}")
+    usd = load_usd_history(date.fromisoformat(startpars), today)
 
     if walk_forward:
         from tools.walk_forward import historical_usd
@@ -834,19 +823,6 @@ def main():
     print("🚀 ЗАПУСК ПОЛНОГО АНАЛИЗА В GITHUB ACTIONS (ТОЧНАЯ КОПИЯ GOOGLE COLAB)")
     print("=" * 60)
     
-    # Проверяем наличие файла usd_data.json
-    if not os.path.exists('usd_data.json'):
-        print("❌ Файл usd_data.json не найден!")
-        print("📋 Создаю новый файл с начальными данными...")
-        
-        initial_data = pd.DataFrame(columns=['begin', 'usdt'])
-        with open('usd_data.json', 'w') as f:
-            json.dump(initial_data.to_json(date_format='iso', orient='records'), f)
-        print("✅ Файл usd_data.json создан")
-    else:
-        print("✅ Файл usd_data.json найден")
-    
-    # Проверяем папку для параметров моделей
     if not os.path.exists('model_params'):
         print("📁 Создаю папку для параметров моделей...")
         os.makedirs('model_params')
