@@ -2,7 +2,6 @@
 ПОЛНЫЙ АНАЛИЗ АКЦИЙ ДЛЯ GITHUB ACTIONS
 Полностью идентичная версия Google Colab
 """
-import os
 import sys
 import json
 import pandas as pd
@@ -10,12 +9,11 @@ import numpy as np
 import requests
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
-import lightgbm
 from lightgbm import LGBMRegressor
-from sklearn.model_selection import GridSearchCV, cross_val_score
 import warnings
 import xml.etree.ElementTree as ET
 from io import StringIO
+from tools.trade_plan import MAX_CANDIDATES, MIN_EDGE, board_details, expected_returns, median_forecasts, recommendations
 
 # ========== КОНФИГУРАЦИЯ И ПРЕДУПРЕЖДЕНИЯ ==========
 def warn(*args, **kwargs):
@@ -368,8 +366,8 @@ def main_pipeline(forecast_days=14):
     }
     
     startpars = '2023-05-29'
-    forecast_days = 14
     today = datetime.now(timezone(timedelta(hours=3))).date()
+    completed_through = today - timedelta(days=1)
     
     debug_print(f"📅 Сегодня: {today}")
     debug_print(f"📅 Стартовая дата для данных: {startpars}")
@@ -386,7 +384,7 @@ def main_pipeline(forecast_days=14):
         
         # Загружаем данные по всем акциям сектора (точно как в Colab)
         for ticker in tickers:
-            df = fetch_shares_data_colab(ticker, startpars, today.strftime('%Y-%m-%d'), is_index=False)
+            df = fetch_shares_data_colab(ticker, startpars, completed_through.isoformat(), is_index=False)
             if not df.empty:
                 df = df[['begin', 'close', 'volume', 'value']].rename(
                     columns={'close': ticker, 'volume': f'vol{ticker}', 'value': f'val{ticker}'}
@@ -416,7 +414,7 @@ def main_pipeline(forecast_days=14):
         ccomb = combined_frame.copy()
         
         # Загружаем реальный индекс сектора (точно как в Colab)
-        sec_real = fetch_shares_data_colab(sector, startpars, today.strftime('%Y-%m-%d'), is_index=True)
+        sec_real = fetch_shares_data_colab(sector, startpars, completed_through.isoformat(), is_index=True)
         if sec_real.empty:
             debug_print(f"  ⚠️ Нет данных по реальному индексу {sector}")
             # Создаем пустой индекс
@@ -477,7 +475,7 @@ def main_pipeline(forecast_days=14):
         debug_print(f"  ✅ Сектор {sector}: {len(ind[sector])} предсказаний, последняя дата: {ind[sector]['begin'].iloc[-1].date()}")
     
     # ========== ЗАГРУЗКА ДАННЫХ BRENT (ТОЧНО КАК В GOOGLE COLAB) ==========
-    bre = fetch_brent_data_colab(startpars, today.strftime('%Y-%m-%d'))
+    bre = fetch_brent_data_colab(startpars, completed_through.isoformat())
     
     earliest_input_date = today - timedelta(days=MAX_INPUT_AGE_DAYS)
     if bre.empty or bre["begin"].max().date() < earliest_input_date:
@@ -491,15 +489,17 @@ def main_pipeline(forecast_days=14):
     # ========== ОБРАБОТКА ДАННЫХ АКЦИЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("📊 Обрабатываю данные по акциям...")
     data_framest = {}
+    order_candles = {}
     
     for sector, tickers in sectors.items():
         sector_data = {}
         for ticker in tickers:
-            df = fetch_shares_data_colab(ticker, startpars, today.strftime('%Y-%m-%d'), is_index=False)
+            df = fetch_shares_data_colab(ticker, startpars, completed_through.isoformat(), is_index=False)
             if df.empty:
                 debug_print(f"  ⚠️ Пропускаю {ticker} - нет данных")
                 continue
             
+            order_candles[ticker] = df.set_index("begin")[["low", "high", "close"]]
             df = df[['begin', 'close', 'volume']].rename(columns={'close': 'ticker'})
             
             # Проверяем, что есть достаточно данных
@@ -559,277 +559,64 @@ def main_pipeline(forecast_days=14):
     
     debug_print(f"✅ Обработаны данные по {sum(len(v) for v in data_framest.values())} акциям")
     
-    # ========== СОЗДАНИЕ ЦЕЛЕВОЙ ПЕРЕМЕННОЙ ==========
-    debug_print("🎯 Создаю целевую переменную...")
-    sppa = []  # Список акций с большим MAE
-    spv = {}   # Словарь важности фичей
-    smpe = 0   # Среднее MAE по всем акциям
-    data_frames = {}
-    
-    for sector, tickers in sectors.items():
-        sector_data = {}
-        for ticker in tickers:
-            if ticker in data_framest.get(sector, {}):
-                result = data_framest[sector][ticker].copy()
-                result['target'] = 0  # Инициализация колонки с макс % роста
-                
-                for i in range(len(result)):
-                    current_close = result.iloc[i]['ticker']
-                    # Проверяем следующие forecast_days дней
-                    if i + forecast_days < len(result):
-                        future_prices = result.iloc[i + 1:i + 1 + forecast_days]['ticker']
-                        result.at[result.index[i], 'target'] = (max(future_prices) - current_close) * 100 / current_close
-                
-                result.dropna(inplace=True)
-                sector_data[ticker] = result
-        
-        data_frames[sector] = sector_data
-    
-    # ========== ОБУЧЕНИЕ МОДЕЛЕЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
-    debug_print("🤖 Обучаю модели...")
-    param_grid = {
-        'num_leaves': [31, 50, 21],
-        'max_depth': [-1, 5, 10],
-        'learning_rate': [0.3, 0.1, 0.2],
-        'n_estimators': [250, 200]
-    }
-    
-    # Создаем папку для сохранения параметров моделей
-    model_params_dir = 'model_params'
-    if not os.path.exists(model_params_dir):
-        os.makedirs(model_params_dir)
-        debug_print(f"📁 Создана папка для параметров моделей: {model_params_dir}")
-    
-    models = {}
-    models_learned_today = 0
-    models_loaded = 0
-    
-    # СОХРАНЯЕМ ВСЕ ПАРАМЕТРЫ МОДЕЛЕЙ ДЛЯ ВСЕХ АКЦИЙ
-    for sector, secd in data_frames.items():
-        models[sector] = {}
-        for ticker in sectors[sector]:
-            if ticker in secd:
-                X = secd[ticker].drop(columns=['target']).iloc[:-(1 + forecast_days)]
-                y = secd[ticker]['target'].iloc[:-(1 + forecast_days)]
-                
-                # Проверяем, есть ли сохраненные параметры для этой модели
-                param_file = f'{model_params_dir}/{sector}_{ticker}_params.json'
-                
-                if os.path.exists(param_file):
-                    # Загружаем сохраненные параметры
-                    try:
-                        with open(param_file, 'r') as f:
-                            loaded_params = json.load(f)
-                        model = LGBMRegressor(random_state=1, **loaded_params)
-                        models_loaded += 1
-                        debug_print(f"  ✅ Загружены параметры для {ticker}")
-                    except Exception as e:
-                        debug_print(f"  ❌ Ошибка загрузки параметров для {ticker}: {e}")
-                        # Если не удалось загрузить, делаем GridSearch
-                        model = LGBMRegressor(random_state=1)
-                        grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4, verbose=0)
-                        grid_search.fit(X, y)
-                        best_model = grid_search.best_estimator_
-                        model = best_model
-                        best_params = grid_search.best_params_
-                        
-                        # Сохраняем параметры модели
-                        with open(param_file, 'w') as f:
-                            json.dump(best_params, f, indent=2)
-                        
-                        models_learned_today += 1
-                        debug_print(f"  💾 Сохранены параметры для {ticker} (после ошибки загрузки)")
-                else:
-                    # Делаем GridSearch для новых моделей
-                    debug_print(f"  🔍 Подбираю параметры для {ticker} с помощью GridSearch...")
-                    model = LGBMRegressor(random_state=1)
-                    grid_search = GridSearchCV(model, param_grid, scoring='neg_mean_squared_error', cv=4, verbose=0)
-                    grid_search.fit(X, y)
-                    best_model = grid_search.best_estimator_
-                    model = best_model
-                    best_params = grid_search.best_params_
-                    
-                    # Сохраняем параметры модели
-                    with open(param_file, 'w') as f:
-                        json.dump(best_params, f, indent=2)
-                    
-                    models_learned_today += 1
-                    debug_print(f"  💾 Сохранены параметры для {ticker}")
-                
-                # Веса для важных примеров
-                threshold = 12
-                weights = np.where(y > threshold, 2, 1)
-                model.fit(X, y, sample_weight=weights)
-                
-                # Кросс-валидация
-                cv_scores = cross_val_score(model, X, y, cv=5, scoring='neg_mean_absolute_error')
-                mse_scores = -cv_scores
-                
-                # Запоминаем акции с большим MAE
-                if mse_scores.mean() > 9:  # Изменено с 7.5 на 9 как в Colab
-                    sppa.append(ticker)
-                    sppa.append(mse_scores.mean())
-                
-                smpe += mse_scores.mean()
-                
-                # Собираем важность фичей
-                for i in range(len(model.feature_importances_)):
-                    if X.columns[i] not in spv.keys():
-                        spv[X.columns[i]] = 0
-                    spv[X.columns[i]] += model.feature_importances_[i]
-                
-                models[sector][ticker] = model
-            else:
-                debug_print(f"  ⚠️ {ticker} нет в данных сектора {sector}")
-    
-    debug_print(f"📊 Загружено моделей: {models_loaded}, обучено новых: {models_learned_today}")
-    
-    # ========== ПРЕДСКАЗАНИЯ ==========
-    debug_print("🔮 Делаю предсказания...")
-    predictions = {}
-    prediction_inputs = {}
-    
-    for sector, secd in data_frames.items():
-        for ticker in sectors[sector]:
-            if ticker in secd and ticker in models.get(sector, {}):
-                try:
-                    last_data = secd[ticker].drop(columns=['target']).iloc[-1].copy()
-                    prediction = models[sector][ticker].predict([last_data])
-                    predictions[ticker] = float(prediction[0])
-                    prediction_inputs[ticker] = {
-                        "data_date": last_data.name.date().isoformat(),
-                        "reference_close": float(last_data["ticker"]),
-                    }
-                except Exception as e:
-                    debug_print(f"  ❌ Ошибка предсказания для {ticker}: {e}")
-                    predictions[ticker] = 0.0
-    
-    # ========== КЛАССИФИКАЦИЯ РЕЗУЛЬТАТОВ (ТОЧНО КАК В GOOGLE COLAB) ==========
-    sr, mn = {}, {}
-    for ticker, pr in predictions.items():
-        if pr > 5.5 and pr < 9.5:  # Изменено как в Colab
-            sr[ticker] = pr
-        elif pr >= 9.5:  # Изменено как в Colab
-            mn[ticker] = pr
-    
-    # Рассчитываем точность модели (обратная величина от средней ошибки)
-    avg_mae = smpe / len(predictions) if predictions else 100
-    accuracy = max(0, 100 - avg_mae)  # Чем меньше MAE, тем выше точность
-    
-    if not prediction_inputs:
-        raise RuntimeError("No forecasts with recent input candles; results were not published")
-    input_dates = [item["data_date"] for item in prediction_inputs.values()]
-    debug_print(f"Prediction input candles: {min(input_dates)} to {max(input_dates)}")
-
-    # ========== ФОРМИРОВАНИЕ РЕЗУЛЬТАТОВ ==========
-    
+    # Use a common completed source session and preserve the historical target.
+    frames = {ticker: frame for group in data_framest.values() for ticker, frame in group.items()}
+    if not frames or not order_candles:
+        raise RuntimeError("No completed stock candles available")
+    signal_date = max(frame.index.max() for frame in frames.values())
+    latest_stock_date = max(frame.index.max() for frame in order_candles.values())
+    if signal_date.date() < earliest_input_date:
+        raise RuntimeError(f"Stock candles are stale: {signal_date.date()}")
+    trade_plan_block = (
+        "Свежая сессия акций ещё не совпадает с датами всех источников."
+        if signal_date < latest_stock_date else None
+    )
+    ranking = sorted(median_forecasts(frames, signal_date, forecast_days), key=lambda row: (-row[1], row[0]))
+    if not ranking:
+        raise RuntimeError(f"No median forecasts for the latest completed session {signal_date.date()}")
+    edge = expected_returns(order_candles, signal_date)
+    if not edge:
+        raise RuntimeError("No historical order return estimates")
+    eligible = ({ticker for ticker, _, _ in ranking[:MAX_CANDIDATES]
+                 if edge.get(ticker, -np.inf) >= MIN_EDGE} if not trade_plan_block else set())
+    metadata = board_details(moex_get, eligible)
+    if eligible - metadata.keys():
+        debug_print(f"Missing TQBR lot metadata: {', '.join(sorted(eligible - metadata.keys()))}")
+    candidates = recommendations(ranking, edge, metadata)
+    predictions = {ticker: score for ticker, score, _ in ranking}
     results_data = {
-        "date": str(today),
+        "date": today.isoformat(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "strategy": "median_ev_025_tp3",
+        "signal_date": signal_date.date().isoformat(),
         "predictions": predictions,
-        "prediction_inputs": prediction_inputs,
-        "forecast_horizon_rows": forecast_days,
-        "medium_potential": dict(sorted(sr.items(), key=lambda item: item[1], reverse=True)),
-        "high_potential": dict(sorted(mn.items(), key=lambda item: item[1], reverse=True)),
-        "poor_accuracy": sppa,
-        "avg_mae": avg_mae,
-        "model_accuracy": round(accuracy, 1),
-        "summary": {
-            "high_count": len(mn),
-            "medium_count": len(sr),
-            "is_bad_day": len(mn) < 6,
-            "is_fifty_fifty": 6 <= len(mn) < 9,
-            "is_good_day": len(mn) >= 9
+        "prediction_inputs": {
+            ticker: {"data_date": signal_date.date().isoformat(), "reference_close": reference}
+            for ticker, _, reference in ranking
         },
-        "model_stats": {
-            "models_loaded": models_loaded,
-            "models_learned_today": models_learned_today,
-            "total_models": len(predictions),
-            "expected_models": sum(len(tickers) for tickers in sectors.values())
-        }
+        "forecast_horizon_rows": forecast_days,
+        "medium_potential": {ticker: score for ticker, score in predictions.items() if 5.5 < score < 9.5},
+        "high_potential": {ticker: score for ticker, score in predictions.items() if score >= 9.5},
+        "trade_candidates": candidates,
+        "trade_plan_block": trade_plan_block,
+        "missing_trade_metadata": sorted(eligible - metadata.keys()),
+        "trade_fee_bps": 5,
     }
-    
-    # Сохраняем результаты для следующего шага
-    with open('latest_results.json', 'w') as f:
-        json.dump(results_data, f, indent=2)
-    
-    debug_print(f"✅ Анализ завершен: {len(predictions)} акций")
-    debug_print(f"🎯 Лучших акций: {len(mn)}")
-    debug_print(f"📊 Средних акций: {len(sr)}")
-    debug_print(f"📈 Средняя абсолютная ошибка текущей CV: {avg_mae:.1f} п.п.")
-    debug_print(f"🤖 Моделей: загружено {models_loaded}, обучено новых {models_learned_today}")
-    debug_print(f"📋 Ожидалось моделей: {results_data['model_stats']['expected_models']}")
-    
-    # Выводим результаты как в Google Colab
-    print(f"\n📊 РЕЗУЛЬТАТЫ АНАЛИЗА")
-    print(f"📅 Дата анализа: {date.today()}")
-    print(f"🎯 Высокий потенциал (>9.5%): {len(mn)} акций")
-    print(f"📊 Средний потенциал (5.5-9.5%): {len(sr)} акций")
-    print(f"📈 Средняя абсолютная ошибка текущей CV: {avg_mae:.1f} п.п.")
-    
-    if len(mn) < 6:
-        print('\nBAD DAY')
-    elif len(mn) < 9:
-        print('\n50/50 DAY')
-    else:
-        print('\n100% GOOD DAY')
-    
-    print(f"\n📊 СРЕДНИЙ ПОТЕНЦИАЛ (отсортировано по убыванию):")
-    for i, (ticker, value) in enumerate(results_data['medium_potential'].items()):
-        if i < 30:  # Ограничим вывод
-            print(f"  {ticker}: +{value:.1f}%")
-    
-    print(f"\n🎯 ВЫСОКИЙ ПОТЕНЦИАЛ (отсортировано по убыванию):")
-    for ticker, value in results_data['high_potential'].items():
-        print(f"  {ticker}: +{value:.1f}%")
-    
-    # Сохраняем отладочные данные
-    debug_data = {
-        'analysis_date': str(today),
-        'predictions_count': len(predictions),
-        'usd_data_last_date': str(usd['begin'].max()) if not usd.empty else "нет данных",
-        'brent_data_last_date': str(bre['begin'].max()) if not bre.empty else "нет данных",
-        'brent_data_range': f"{bre['begin'].min().date() if not bre.empty else 'нет'} - {bre['begin'].max().date() if not bre.empty else 'нет'}",
-        'results_summary': results_data['summary'],
-        'model_stats': results_data['model_stats'],
-        'avg_mae': avg_mae,
-        'model_accuracy': accuracy
-    }
-    save_debug_data(debug_data, f"debug_{today}.json")
-    
+    with open("latest_results.json", "w", encoding="utf-8") as f:
+        json.dump(results_data, f, ensure_ascii=False, indent=2, allow_nan=False)
+    debug_print(f"Median forecasts: {len(predictions)}, session {signal_date.date()}, trade candidates: {len(candidates)}")
     return results_data
 
+
 def main():
-    """Основная функция для GitHub Actions"""
-    print("=" * 60)
-    print("🚀 ЗАПУСК ПОЛНОГО АНАЛИЗА В GITHUB ACTIONS (ТОЧНАЯ КОПИЯ GOOGLE COLAB)")
-    print("=" * 60)
-    
-    if not os.path.exists('model_params'):
-        print("📁 Создаю папку для параметров моделей...")
-        os.makedirs('model_params')
-        print("✅ Папка model_params создана")
-    else:
-        print(f"✅ Папка model_params найдена, файлов: {len(os.listdir('model_params'))}")
-    
     try:
-        print("🔧 Запускаю полный анализ (точная копия Google Colab)...")
-        results = main_pipeline(forecast_days=14)
-        
-        print(f"\n✅ Анализ завершен: {len(results.get('predictions', {}))} акций")
-        print(f"🎯 Лучших акций: {results.get('summary', {}).get('high_count', 0)}")
-        print(f"📊 Средних акций: {results.get('summary', {}).get('medium_count', 0)}")
-        print(f"📈 Средняя абсолютная ошибка текущей CV: {results.get('avg_mae', 0):.1f} п.п.")
-        print(f"🤖 Моделей: загружено {results.get('model_stats', {}).get('models_loaded', 0)}, обучено новых {results.get('model_stats', {}).get('models_learned_today', 0)}")
-        print(f"📋 Ожидалось моделей: {results.get('model_stats', {}).get('expected_models', 0)}")
-        
-        return results
-        
-    except Exception as e:
-        print(f"❌ Ошибка при анализе: {e}")
+        main_pipeline()
+    except Exception:
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

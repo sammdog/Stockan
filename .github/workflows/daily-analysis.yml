@@ -30,12 +30,11 @@ jobs:
     - name: 📥 Checkout code
       uses: actions/checkout@v4
       
-    - name: 📦 Кэширование данных (usd_data.json и model_params)
+    - name: 📦 Кэширование данных (курса USD)
       uses: actions/cache@v4
       with:
         path: |
           usd_data.json
-          model_params
         key: ${{ runner.os }}-state-cache-${{ github.run_id }}
         restore-keys: |
           ${{ runner.os }}-state-cache-
