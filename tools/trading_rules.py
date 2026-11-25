@@ -1,7 +1,7 @@
 """Chronological sensitivity tests for manual Stockan trading rules."""
 
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -122,79 +122,15 @@ def audit_rules(predictions, market, sessions, index):
     estimates = order_statistics(market, sessions, sorted(predictions.ticker.unique()), 0.0005)
     if not estimates:
         raise ValueError("No resolved history for estimating order returns")
-    methods = ("median", "relative_l1", "pooled_relative_l1", "double_tail_weight")
-    candidates = variants()
-    rows = []
-    chosen = []
-
-    def run(ranks, rules, period, phase):
-        if period == "selection":
-            source = ranks[ranks.date < SWITCH]
-            calendar = [day for day in sessions if day < SWITCH]
-        elif period == "validation":
-            source = ranks[ranks.date >= SWITCH]
-            calendar = sessions
-        else:
-            source, calendar = ranks, sessions
-        return simulate(source, market, calendar, 50_000, 5, phase, rules, estimates, contexts)[0]
-
-    def record(ranks, method, group, name, rules, period, phase=0):
-        summary = run(ranks, rules, period, phase)
-        row = {"method": method, "group": group, "variant": name, "period": period,
-               "phase": phase, "rules": asdict(rules), **summary}
-        rows.append(row)
-        return summary
-
-    for method in methods:
-        ranks = predictions.sort_values(["date", method, "ticker"], ascending=[True, False, True])
-        baseline = Rules()
-        base_score = record(ranks, method, "baseline", "baseline", baseline, "selection")["net_pnl"]
-        record(ranks, method, "baseline", "baseline", baseline, "full")
-        for phase in (0, 1):
-            record(ranks, method, "baseline", "baseline", baseline, "validation", phase)
-        winners = []
-        for group, options in candidates.items():
-            results = []
-            for name, configuration in options.items():
-                rules = replace(baseline, **configuration)
-                results.append((record(ranks, method, group, name, rules, "selection")["net_pnl"],
-                                name, configuration))
-                record(ranks, method, group, name, rules, "full")
-                record(ranks, method, group, name, rules, "validation")
-            best = max(results, key=lambda result: result[0])
-            if best[0] > base_score:
-                winners.append((best[0], group, best[1], best[2]))
-        combined = baseline
-        score = base_score
-        accepted = []
-        # Prefer the largest individual selection improvement, keeping a rule
-        # only where its incremental contribution is positive on selection.
-        for _, group, name, changes in sorted(winners, key=lambda item: -item[0]):
-            trial = replace(combined, **changes)
-            trial_score = run(ranks, trial, "selection", 0)["net_pnl"]
-            if trial_score > score:
-                score = trial_score
-                combined = trial
-                accepted.append(name)
-        chosen.append({"method": method, "included": accepted, "rules": asdict(combined)})
-        for period in ("selection", "full"):
-            record(ranks, method, "combined", "combined", combined, period)
-        for phase in (0, 1):
-            record(ranks, method, "combined", "combined", combined, "validation", phase)
-
-    Path("trading_rules_summary.json").write_text(json.dumps({"selection_end": str(SWITCH.date()), "chosen": chosen, "runs": rows}, indent=2) + "\n")
-    details = []
-    for row in rows:
-        details.extend({"method": row["method"], "group": row["group"], "variant": row["variant"],
-                        "period": row["period"], "phase": row["phase"], "month": month, "pnl": pnl}
-                       for month, pnl in row["monthly_pnl"].items())
-        if row["group"] in {"baseline", "combined"} or (row["period"] == "full" and row["method"] == "median"):
-            message = {k: row[k] for k in ("method", "group", "variant", "period", "phase",
-                                           "net_pnl", "max_drawdown_pct", "filled", "sold",
-                                           "rule_skips", "risk_exit_count", "open_cost")}
-            if row["group"] in {"baseline", "combined"}:
-                message["monthly_pnl"] = row["monthly_pnl"]
-            print("TRADING_RULE " + json.dumps(message), flush=True)
-    for item in chosen:
-        print("TRADING_CHOSEN " + json.dumps(item), flush=True)
-    pd.DataFrame(details).to_csv("trading_rules_monthly.csv", index=False)
+    ranks = predictions.sort_values(["date", "median", "ticker"], ascending=[True, False, True])
+    frequency = []
+    for period, source in (("full", ranks), ("from_june", ranks[ranks.date >= SWITCH])):
+        for cadence, phase in ((2, 0), (2, 1), (1, 0)):
+            report, equity, trades = simulate(
+                source, market, sessions, 50_000, 5, phase,
+                Rules(ev_threshold=0.0025), estimates, contexts, cadence
+            )
+            item = {"period": period, "cadence": cadence, "phase": phase, **report}
+            print("FREQUENCY " + json.dumps(item), flush=True)
+            frequency.append(item)
+    Path("frequency_summary.json").write_text(json.dumps(frequency, indent=2) + "\n")

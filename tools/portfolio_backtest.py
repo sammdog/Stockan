@@ -27,7 +27,7 @@ class Position:
     last_review: int = 0
 
 
-def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, estimates=None, contexts=None):
+def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, estimates=None, contexts=None, cadence=2):
     fee = fee_bps / 10_000
     signals = {
         day: list(group["ticker"])
@@ -36,7 +36,7 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, est
     session_number = {day: i for i, day in enumerate(sessions)}
     first, last = min(signals), max(signals)
     eligible = [day for day in sessions if first <= day <= last]
-    schedule = set(eligible[phase::2])
+    schedule = set(eligible[phase::cadence])
     cash = capital
     cooldown_until = {}
     positions = []
