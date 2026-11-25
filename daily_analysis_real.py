@@ -454,29 +454,15 @@ def main_pipeline(forecast_days=14):
     try:
         with open(file_pa, 'r') as f:
             usdtt = pd.read_json(json.load(f))
-        debug_print(f"✅ Файл usd_data.json загружен: {len(usdtt)} строк")
+        usdtt["begin"] = pd.to_datetime(usdtt["begin"], format="ISO8601")
+        usdtt = usdtt.dropna(subset=["begin", "usdt"])
+        debug_print(f"💾 Кэш USD: {len(usdtt)} строк")
     except Exception as e:
         debug_print(f"⚠️ Ошибка загрузки usd_data.json: {e}")
-        debug_print("📋 Создаю новый DataFrame...")
-        usdtt = pd.DataFrame(columns=['begin', 'usdt'])
-    
-    # Определяем последнюю дату в файле
-    if usdtt.empty:
-        startusd = (today - timedelta(days=30)).strftime('%Y-%m-%d')
-        debug_print("📅 usd_data.json пуст, начинаю загрузку с 30 дней назад")
-    else:
-        startusd = usdtt['begin'].iloc[-1] if 'begin' in usdtt.columns and not usdtt.empty else (today - timedelta(days=30)).strftime('%Y-%m-%d')
-        debug_print(f"📅 Последняя дата в файле USD: {startusd}")
-    
-    # Преобразуем startusd в дату
-    try:
-        if isinstance(startusd, str):
-            start_date = datetime.strptime(startusd, '%Y-%m-%dT%H:%M:%S.%f').date()
-        else:
-            start_date = startusd.date() if hasattr(startusd, 'date') else (today - timedelta(days=30))
-    except:
-        start_date = today - timedelta(days=30)
-    
+        usdtt = pd.DataFrame(columns=["begin", "usdt"])
+
+    start_date = usdtt["begin"].max().date() if not usdtt.empty else today - timedelta(days=30)
+
     end_date = today
     
     usd_rates = {}
@@ -505,33 +491,16 @@ def main_pipeline(forecast_days=14):
         
         current_date += timedelta(days=1)
     
-    # Всегда обновляем файл
+    usd = usdtt
     if usd_rates:
-        usd_new = pd.DataFrame(list(usd_rates.items()), columns=['begin', 'usdt'])
-        usd_new['begin'] = pd.to_datetime(usd_new['begin'], format='%d/%m/%Y')
-        
-        if not usdtt.empty and 'begin' in usdtt.columns:
-            usdtt['begin'] = pd.to_datetime(usdtt['begin'])
-            usd = pd.concat([usdtt, usd_new], ignore_index=True).drop_duplicates(subset='begin', keep='last')
-        else:
-            usd = usd_new
-    else:
-        usd = usdtt.copy()
-        if not usd.empty:
-            new_row = pd.DataFrame({'begin': [pd.Timestamp(end_date)], 'usdt': [np.nan]})
-            usd = pd.concat([usd, new_row], ignore_index=True).drop_duplicates(subset='begin', keep='last')
-    
-    # Сохраняем обновленные данные
-    with open(file_pa, 'w') as f:
-        json.dump(usd.to_json(date_format='iso', orient='records'), f)
-    
-    debug_print(f"💾 Файл USD сохранен. Теперь строк: {len(usd)}, последняя дата: {usd['begin'].max() if not usd.empty else 'нет данных'}")
-    
-    if 'begin' in usd.columns:
-        usd['begin'] = pd.to_datetime(usd['begin'])
-    else:
-        usd = pd.DataFrame(columns=['begin', 'usdt'])
-    
+        usd_new = pd.DataFrame(list(usd_rates.items()), columns=["begin", "usdt"])
+        usd_new["begin"] = pd.to_datetime(usd_new["begin"], format="%d/%m/%Y")
+        usd = pd.concat([usdtt, usd_new], ignore_index=True).drop_duplicates("begin", keep="last")
+
+    with open(file_pa, "w") as f:
+        json.dump(usd.to_json(date_format="iso", orient="records"), f)
+    debug_print(f"💾 Файл USD сохранён: {len(usd)} строк, последняя дата {usd['begin'].max()}")
+
     # ========== ОБРАБОТКА ДАННЫХ АКЦИЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("📊 Обрабатываю данные по акциям...")
     data_framest = {}
