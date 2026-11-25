@@ -8,7 +8,7 @@ import json
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 import lightgbm
 from lightgbm import LGBMRegressor
@@ -182,61 +182,52 @@ def get_currency_rate(date):
         debug_print(f"Ошибка при запросе курса на {date.strftime('%d/%m/%Y')}: {e}")
     return None
 
-# ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ BRENT (ТОЧНО КАК В GOOGLE COLAB) ==========
+# Preserve the historical series through the final trading date of BRJ6.
+BRENT_ROLL_START = date(2026, 4, 2)
+BRENT_LEGACY_CONTRACTS = ("BRU3", "BRU4", "BRU5", "BRJ6")
+BRENT_MONTH_CODES = "FGHJKMNQUVXZ"
+MAX_INPUT_AGE_DAYS = 10
+
+
 def fetch_brent_data_colab(start_date, end_date):
-    """Загружает данные Brent точно как в Google Colab"""
-    debug_print("🛢️ Загружаю данные по Brent (метод Colab)...")
-    
-    # Определяем нужные контракты на каждый год с 2023 по 2026
-    brent_contracts = ['BRU3', 'BRU4', 'BRU5', 'BRJ6']
-    
-    bre_all = []
-    loaded_contracts = []
-    
-    for contract in brent_contracts:
-        debug_print(f"  🔄 Загружаю контракт {contract}...")
-        
-        df = fetch_futures_data_colab(contract, start_date, end_date)
-        
-        if not df.empty:
-            df = df[['begin', 'close']].rename(columns={'close': 'brent'})
-            bre_all.append(df)
-            loaded_contracts.append(contract)
-            debug_print(f"    ✅ Загружено {len(df)} строк")
-            
-            # Логируем диапазон дат для этого контракта
-            if not df.empty:
-                debug_print(f"    📅 {contract}: {df['begin'].min().date()} - {df['begin'].max().date()}")
-        else:
-            debug_print(f"    ⚠️ Нет данных по контракту {contract}")
-    
-    # Объединяем все данные
-    if bre_all:
-        bre = pd.concat(bre_all, ignore_index=True)
-        bre = bre[['begin', 'brent']]
-        
-        # Сортируем по дате и удаляем дубликаты
-        bre = bre.sort_values('begin').drop_duplicates(subset='begin', keep='last')
-        
-        # Выводим информацию о диапазоне дат
-        if not bre.empty:
-            debug_print(f"📊 Всего данных Brent: {len(bre)} строк")
-            debug_print(f"📅 Диапазон данных Brent: {bre['begin'].min().date()} - {bre['begin'].max().date()}")
-            
-            # Проверяем наличие пропусков
-            date_range = pd.date_range(start=bre['begin'].min(), end=bre['begin'].max())
-            missing_dates = [d for d in date_range if d not in bre['begin'].values]
-            if missing_dates:
-                debug_print(f"⚠️ Обнаружены пропуски в данных Brent: {len(missing_dates)} дней")
-        else:
-            debug_print("⚠️ Данные Brent пусты после объединения")
-            bre = pd.DataFrame(columns=['begin', 'brent'])
-        
-        debug_print(f"✅ Успешно загружены контракты: {', '.join(loaded_contracts)}")
-        return bre
-    else:
-        debug_print("❌ Не удалось загрузить данные по Brent ни из одного контракта")
-        return pd.DataFrame(columns=['begin', 'brent'])
+    """Append next-calendar-month MOEX BR closes to the legacy history."""
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    windows = []
+    legacy_end = min(end, BRENT_ROLL_START - timedelta(days=1))
+    if start <= legacy_end:
+        windows.extend((ticker, start, legacy_end) for ticker in BRENT_LEGACY_CONTRACTS)
+
+    window_start = max(start, BRENT_ROLL_START)
+    while window_start <= end:
+        next_month = (window_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        ticker = f"BR{BRENT_MONTH_CODES[next_month.month - 1]}{next_month.year % 10}"
+        window_end = min(end, next_month - timedelta(days=1))
+        windows.append((ticker, window_start, window_end))
+        window_start = next_month
+
+    parts = []
+    for ticker, lower, upper in windows:
+        frame = fetch_futures_data_colab(ticker, lower.isoformat(), upper.isoformat())
+        if not frame.empty:
+            dates = frame["begin"].dt.date
+            frame = frame.loc[dates.between(lower, upper), ["begin", "close"]]
+            if not frame.empty:
+                parts.append(frame.rename(columns={"close": "brent"}))
+                debug_print(f"Brent {ticker}: {len(frame)} candles for {lower} to {upper}")
+                continue
+        if lower >= BRENT_ROLL_START and (end - upper).days > MAX_INPUT_AGE_DAYS:
+            raise RuntimeError(f"No Brent candles for {ticker} in {lower} to {upper}")
+
+    if not parts:
+        return pd.DataFrame(columns=["begin", "brent"])
+    # Legacy contracts overlap. Prefer the later contract in the original list.
+    brent = pd.concat(parts, ignore_index=True).drop_duplicates("begin", keep="last")
+    brent = brent.sort_values("begin").reset_index(drop=True)
+    legacy = brent.loc[brent["begin"].dt.date < BRENT_ROLL_START]
+    debug_print(f"Legacy Brent coverage: {len(legacy)} candles, last {legacy['begin'].max()}")
+    debug_print(f"Extended Brent coverage: {len(brent)} candles, last {brent['begin'].max()}")
+    return brent
 
 # ========== ОСНОВНОЙ КОД ==========
 def main_pipeline(forecast_days=14):
@@ -341,7 +332,7 @@ def main_pipeline(forecast_days=14):
     
     startpars = '2023-05-29'
     forecast_days = 14
-    today = date.today()
+    today = datetime.now(timezone(timedelta(hours=3))).date()
     
     debug_print(f"📅 Сегодня: {today}")
     debug_print(f"📅 Стартовая дата для данных: {startpars}")
@@ -451,12 +442,11 @@ def main_pipeline(forecast_days=14):
     # ========== ЗАГРУЗКА ДАННЫХ BRENT (ТОЧНО КАК В GOOGLE COLAB) ==========
     bre = fetch_brent_data_colab(startpars, today.strftime('%Y-%m-%d'))
     
-    if bre.empty:
-        debug_print("⚠️ Не удалось загрузить данные Brent, создаю пустой DataFrame")
-        bre = pd.DataFrame(columns=['begin', 'brent'])
-    else:
-        debug_print(f"✅ Данные Brent загружены: {len(bre)} строк, последняя дата: {bre['begin'].max().date()}")
-    
+    earliest_input_date = today - timedelta(days=MAX_INPUT_AGE_DAYS)
+    if bre.empty or bre["begin"].max().date() < earliest_input_date:
+        last_brent = bre["begin"].max()
+        raise RuntimeError(f"Brent data is stale: last candle {last_brent}, expected {earliest_input_date} or later")
+
     # ========== ЗАГРУЗКА И ОБНОВЛЕНИЕ USD ДАННЫХ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("💵 Загружаю и обновляю данные по USD...")
     file_pa = 'usd_data.json'
@@ -604,6 +594,9 @@ def main_pipeline(forecast_days=14):
                         df[f'{column}_lag_{lag}'] = df[column].shift(lag)
             
             df.dropna(inplace=True)
+            if df.empty or df.index[-1].date() < earliest_input_date:
+                debug_print(f"Skipping {ticker}: last usable candle {df.index.max()}")
+                continue
             sector_data[ticker] = df
         
         data_framest[sector] = sector_data
@@ -767,15 +760,15 @@ def main_pipeline(forecast_days=14):
     avg_mae = smpe / len(predictions) if predictions else 100
     accuracy = max(0, 100 - avg_mae)  # Чем меньше MAE, тем выше точность
     
-    if prediction_inputs:
-        input_dates = [item["data_date"] for item in prediction_inputs.values()]
-        debug_print(f"Prediction input candles: {min(input_dates)} to {max(input_dates)}")
+    if not prediction_inputs:
+        raise RuntimeError("No forecasts with recent input candles; results were not published")
+    input_dates = [item["data_date"] for item in prediction_inputs.values()]
+    debug_print(f"Prediction input candles: {min(input_dates)} to {max(input_dates)}")
 
     # ========== ФОРМИРОВАНИЕ РЕЗУЛЬТАТОВ ==========
-    from datetime import datetime, timezone
     
     results_data = {
-        "date": str(date.today()),
+        "date": str(today),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "predictions": predictions,
         "prediction_inputs": prediction_inputs,
