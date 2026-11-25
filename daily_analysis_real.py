@@ -230,6 +230,34 @@ def fetch_brent_data_colab(start_date, end_date):
     return brent
 
 # ========== ОСНОВНОЙ КОД ==========
+def forward_calendar_growth(candles):
+    dates = candles["begin"].to_numpy(dtype="datetime64[D]")
+    prices = candles["close"].to_numpy(dtype=float)
+    deadline = dates + np.timedelta64(14, "D")
+    stops = np.searchsorted(dates, deadline, side="right")
+    return pd.Series({
+        pd.Timestamp(dates[i]): (prices[i + 1:stop].max() / prices[i] - 1) * 100
+        for i, stop in enumerate(stops)
+        if deadline[i] <= dates[-1] and stop > i + 1 and prices[i] > 0
+    }, dtype=float)
+
+
+def report_growth_frequency(horizon, by_ticker):
+    all_values = pd.concat(by_ticker.values())
+    for ticker, values in {"ALL": all_values, **by_ticker}.items():
+        if ticker not in {"ALL", "SFIN", "MRKY", "PRFN", "WUSH", "BLNG"} or values.empty:
+            continue
+        print("GROWTH_AUDIT " + json.dumps({
+            "horizon": horizon,
+            "ticker": ticker,
+            "windows": len(values),
+            "from": str(values.index.min().date()),
+            "through": str(values.index.max().date()),
+            "tickers": sum(not v.empty for v in by_ticker.values()) if ticker == "ALL" else 1,
+            "hits": {str(t): int((values >= t).sum()) for t in (9.5, 20, 25, 30)},
+        }))
+
+
 def main_pipeline(forecast_days=14):
     """
     Основная функция для запуска всего пайплайна
@@ -502,6 +530,8 @@ def main_pipeline(forecast_days=14):
     # ========== ОБРАБОТКА ДАННЫХ АКЦИЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("📊 Обрабатываю данные по акциям...")
     data_framest = {}
+    audit_growth = os.environ.get("STOCKAN_AUDIT_GROWTH") == "1"
+    raw_growth = {}
     
     for sector, tickers in sectors.items():
         sector_data = {}
@@ -511,6 +541,8 @@ def main_pipeline(forecast_days=14):
                 debug_print(f"  ⚠️ Пропускаю {ticker} - нет данных")
                 continue
             
+            if audit_growth:
+                raw_growth[ticker] = forward_calendar_growth(df)
             df = df[['begin', 'close', 'volume']].rename(columns={'close': 'ticker'})
             
             # Проверяем, что есть достаточно данных
@@ -596,6 +628,16 @@ def main_pipeline(forecast_days=14):
         
         data_frames[sector] = sector_data
     
+    if audit_growth:
+        aligned_growth = {
+            ticker: frame["target"].iloc[:-(1 + forecast_days)]
+            for frames in data_frames.values()
+            for ticker, frame in frames.items()
+        }
+        report_growth_frequency("model_14_rows", aligned_growth)
+        report_growth_frequency("calendar_14_days", raw_growth)
+        raise SystemExit(0)
+
     # ========== ОБУЧЕНИЕ МОДЕЛЕЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("🤖 Обучаю модели...")
     param_grid = {
