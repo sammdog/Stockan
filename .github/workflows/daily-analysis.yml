@@ -84,6 +84,13 @@ jobs:
         echo "🚀 Запускаю ПОЛНЫЙ анализ из daily_analysis_real.py..."
         python daily_analysis_real.py
     
+    - name: Archive forecast for backtesting
+      uses: actions/upload-artifact@v4
+      with:
+        name: stockan-forecast
+        path: latest_results.json
+        if-no-files-found: error
+
     - name: ☁️ Загрузка результатов на Google Drive
       if: success()
       env:

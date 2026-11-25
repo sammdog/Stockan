@@ -738,6 +738,7 @@ def main_pipeline(forecast_days=14):
     # ========== ПРЕДСКАЗАНИЯ ==========
     debug_print("🔮 Делаю предсказания...")
     predictions = {}
+    prediction_inputs = {}
     
     for sector, secd in data_frames.items():
         for ticker in sectors[sector]:
@@ -746,6 +747,10 @@ def main_pipeline(forecast_days=14):
                     last_data = secd[ticker].drop(columns=['target']).iloc[-1].copy()
                     prediction = models[sector][ticker].predict([last_data])
                     predictions[ticker] = float(prediction[0])
+                    prediction_inputs[ticker] = {
+                        "data_date": last_data.name.date().isoformat(),
+                        "reference_close": float(last_data["ticker"]),
+                    }
                 except Exception as e:
                     debug_print(f"  ❌ Ошибка предсказания для {ticker}: {e}")
                     predictions[ticker] = 0.0
@@ -762,6 +767,10 @@ def main_pipeline(forecast_days=14):
     avg_mae = smpe / len(predictions) if predictions else 100
     accuracy = max(0, 100 - avg_mae)  # Чем меньше MAE, тем выше точность
     
+    if prediction_inputs:
+        input_dates = [item["data_date"] for item in prediction_inputs.values()]
+        debug_print(f"Prediction input candles: {min(input_dates)} to {max(input_dates)}")
+
     # ========== ФОРМИРОВАНИЕ РЕЗУЛЬТАТОВ ==========
     from datetime import datetime, timezone
     
@@ -769,6 +778,8 @@ def main_pipeline(forecast_days=14):
         "date": str(date.today()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "predictions": predictions,
+        "prediction_inputs": prediction_inputs,
+        "forecast_horizon_rows": forecast_days,
         "medium_potential": dict(sorted(sr.items(), key=lambda item: item[1], reverse=True)),
         "high_potential": dict(sorted(mn.items(), key=lambda item: item[1], reverse=True)),
         "poor_accuracy": sppa,
@@ -796,7 +807,7 @@ def main_pipeline(forecast_days=14):
     debug_print(f"✅ Анализ завершен: {len(predictions)} акций")
     debug_print(f"🎯 Лучших акций: {len(mn)}")
     debug_print(f"📊 Средних акций: {len(sr)}")
-    debug_print(f"📈 Точность модели: {accuracy:.1f}%")
+    debug_print(f"📈 Средняя абсолютная ошибка текущей CV: {avg_mae:.1f} п.п.")
     debug_print(f"🤖 Моделей: загружено {models_loaded}, обучено новых {models_learned_today}")
     debug_print(f"📋 Ожидалось моделей: {results_data['model_stats']['expected_models']}")
     
@@ -805,7 +816,7 @@ def main_pipeline(forecast_days=14):
     print(f"📅 Дата анализа: {date.today()}")
     print(f"🎯 Высокий потенциал (>9.5%): {len(mn)} акций")
     print(f"📊 Средний потенциал (5.5-9.5%): {len(sr)} акций")
-    print(f"📈 Точность модели: {accuracy:.1f}%")
+    print(f"📈 Средняя абсолютная ошибка текущей CV: {avg_mae:.1f} п.п.")
     
     if len(mn) < 6:
         print('\nBAD DAY')
@@ -872,7 +883,7 @@ def main():
         print(f"\n✅ Анализ завершен: {len(results.get('predictions', {}))} акций")
         print(f"🎯 Лучших акций: {results.get('summary', {}).get('high_count', 0)}")
         print(f"📊 Средних акций: {results.get('summary', {}).get('medium_count', 0)}")
-        print(f"📈 Точность модели: {results.get('model_accuracy', 0)}%")
+        print(f"📈 Средняя абсолютная ошибка текущей CV: {results.get('avg_mae', 0):.1f} п.п.")
         print(f"🤖 Моделей: загружено {results.get('model_stats', {}).get('models_loaded', 0)}, обучено новых {results.get('model_stats', {}).get('models_learned_today', 0)}")
         print(f"📋 Ожидалось моделей: {results.get('model_stats', {}).get('expected_models', 0)}")
         
