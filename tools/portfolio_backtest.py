@@ -27,7 +27,7 @@ class Position:
     last_review: int = 0
 
 
-def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, estimates=None, contexts=None, cadence=2):
+def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, estimates=None, contexts=None, cadence=2, downside=None):
     fee = fee_bps / 10_000
     signals = {
         day: list(group["ticker"])
@@ -95,7 +95,10 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, est
                     position.cooldown_seen = True
                 if ((rules.stop and drawdown <= -rules.stop)
                         or (rules.max_age and age >= rules.max_age)
-                        or (rules.weak_exit and age >= 10 and drawdown <= -0.05 and trend20 <= -0.05)):
+                        or (rules.weak_exit and age >= 10 and drawdown <= -0.05 and trend20 <= -0.05)
+                        or (rules.market_exit and age >= 5 and drawdown <= -0.03 and trend20 <= -rules.market_exit)
+                        or (rules.downside_exit and age >= 5 and drawdown <= -0.03
+                            and downside.get((day, position.ticker), 0) >= rules.downside_exit)):
                     position.risk_pending = True
                 if rules.review_target and ordinal - position.last_review >= rules.review_target:
                     options = [(estimates.get((month, rules.discount, target, position.ticker), -np.inf), target)

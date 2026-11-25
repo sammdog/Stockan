@@ -1,7 +1,7 @@
 """Chronological sensitivity tests for manual Stockan trading rules."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +32,8 @@ class Rules:
     stop: float = 0
     weak_exit: bool = False
     market: str = ""
+    market_exit: float = 0
+    downside_exit: float = 0
 
 
 def variants():
@@ -117,20 +119,78 @@ def market_context(index, sessions):
     }
 
 
+def downside_probabilities(market, sessions, tickers, contexts):
+    """Forecast a further 5% close decline over twenty sessions."""
+    calendar = pd.DatetimeIndex(sessions)
+    regime = np.array([contexts[day][0] < 0 for day in calendar])
+    months = calendar.to_period("M")
+    histories = {}
+    for ticker in tickers:
+        close = pd.Series([market[day].get(ticker, (None, None, np.nan))[2]
+                           for day in calendar], index=calendar, dtype=float)
+        momentum = close / close.shift(20) - 1
+        bucket = np.digitize(momentum.to_numpy(), [-0.1, 0, 0.1]) + 4 * regime
+        future = close.shift(-20) / close - 1
+        histories[ticker] = bucket, (future <= -0.05).to_numpy(), (future.notna() & momentum.notna()).to_numpy(), momentum.notna().to_numpy()
+    probabilities = {}
+    for month in months.unique():
+        end = calendar.searchsorted(month.start_time) - 20
+        if end < 60:
+            continue
+        start = max(0, end - 240)
+        summaries = {}
+        total_count = np.zeros(8)
+        total_hit = np.zeros(8)
+        for ticker, (bucket, sell, valid, known) in histories.items():
+            valid = valid[start:end]
+            states = bucket[start:end][valid]
+            counts = np.bincount(states, minlength=8)[:8]
+            hits = np.bincount(states, weights=sell[start:end][valid], minlength=8)[:8]
+            summaries[ticker] = counts, hits
+            total_count += counts
+            total_hit += hits
+        prior = (total_hit + 1) / (total_count + 2)
+        for ticker, (bucket, _, _, known) in histories.items():
+            counts, hits = summaries[ticker]
+            rates = (hits + 30 * prior) / (counts + 30)
+            for i in np.flatnonzero((months == month) & known):
+                probabilities[(calendar[i], ticker)] = float(rates[bucket[i]])
+    return probabilities
+
+
 def audit_rules(predictions, market, sessions, index):
     contexts = market_context(index, sessions)
-    estimates = order_statistics(market, sessions, sorted(predictions.ticker.unique()), 0.0005)
-    if not estimates:
-        raise ValueError("No resolved history for estimating order returns")
+    tickers = sorted(predictions.ticker.unique())
+    estimates = order_statistics(market, sessions, tickers, 0.0005)
+    downside = downside_probabilities(market, sessions, tickers, contexts)
+    if not estimates or not downside:
+        raise ValueError("Insufficient history for exit rules")
     ranks = predictions.sort_values(["date", "median", "ticker"], ascending=[True, False, True])
-    frequency = []
-    for period, source in (("full", ranks), ("from_june", ranks[ranks.date >= SWITCH])):
-        for cadence, phase in ((2, 0), (2, 1), (1, 0)):
-            report, equity, trades = simulate(
-                source, market, sessions, 50_000, 5, phase,
-                Rules(ev_threshold=0.0025), estimates, contexts, cadence
-            )
-            item = {"period": period, "cadence": cadence, "phase": phase, **report}
-            print("FREQUENCY " + json.dumps(item), flush=True)
-            frequency.append(item)
-    Path("frequency_summary.json").write_text(json.dumps(frequency, indent=2) + "\n")
+    base = Rules(ev_threshold=0.0025)
+    choices = {
+        "baseline": base,
+        "stop_5": replace(base, stop=0.05),
+        "stop_8": replace(base, stop=0.08),
+        "stop_12": replace(base, stop=0.12),
+        "time_30": replace(base, max_age=30),
+        "market_exit_5": replace(base, market_exit=0.05),
+        "market_exit_10": replace(base, market_exit=0.1),
+        "downside_45": replace(base, downside_exit=0.45),
+        "downside_60": replace(base, downside_exit=0.6),
+        "market_5_and_downside_45": replace(base, market_exit=0.05, downside_exit=0.45),
+    }
+    periods = {
+        "full": (ranks, sessions),
+        "selection": (ranks[ranks.date < SWITCH], [d for d in sessions if d < SWITCH]),
+        "from_june": (ranks[ranks.date >= SWITCH], sessions),
+    }
+    reports = []
+    for period, (source, calendar) in periods.items():
+        for name, rules in choices.items():
+            report, _, _ = simulate(source, market, calendar, 50_000, 5,
+                                    rules=rules, estimates=estimates, contexts=contexts,
+                                    cadence=1, downside=downside)
+            row = {"period": period, "rule": name, **report}
+            print("EXIT_RISK " + json.dumps(row), flush=True)
+            reports.append(row)
+    Path("exit_risk_summary.json").write_text(json.dumps(reports, indent=2) + "\n")
