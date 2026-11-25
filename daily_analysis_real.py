@@ -248,7 +248,6 @@ def main_pipeline(forecast_days=14):
             'LKOH': [5200, 5100, 4200, 3700],
             'T': [609.3, 975.3, 862.8, 864.6],
             'GMKN': [2400, 1900, 1600, 2400],
-            'PIKK': [555.7, 287.6, 322, 299.9]
         },
         'MOEXOG': {
             'GAZP': [3700, 3600, 3100, 2900],
@@ -286,7 +285,6 @@ def main_pipeline(forecast_days=14):
             'HYDR': [339.7, 226, 200.2, 185.9]
         },
         'MOEXRE': {
-            'PIKK': [555.7, 287.6, 322, 299.9],
             'SMLT': [235.5, 79.3, 74.8, 57.3],
             'LSRG': [95.2, 88.9, 76.7, 69],
             'MSTT': [61.9, 37.2, 33, 31]
@@ -319,13 +317,13 @@ def main_pipeline(forecast_days=14):
     }
     
     sectorsi = {
-        'IMOEX2': ['VTBR', 'SBER', 'LKOH', 'T', 'GAZP','GMKN','PIKK'],
+        'IMOEX2': ['VTBR', 'SBER', 'LKOH', 'T', 'GAZP','GMKN'],
         'MOEXOG': ['GAZP', 'NVTK', 'ROSN', 'TATN','LKOH'],
         'MOEXMM': ['GMKN', 'MAGN', 'NLMK', 'PLZL','MTLR'],
         'MOEXIT': ['YDEX', 'VKCO', 'ASTR', 'POSI','SOFL'],
         'MOEXFN': ['VTBR', 'SBER', 'T', 'SVCB','BSPB'],
         'MOEXEU': ['IRAO', 'UPRO','FEES','MSNG','HYDR'],
-        'MOEXRE': ['PIKK', 'SMLT','LSRG','MSTT'],
+        'MOEXRE': ['SMLT','LSRG','MSTT'],
         'MOEXTN': ['AFLT', 'FLOT','SVAV','FESH','KMAZ'],
         'MOEXCN': ['MVID', 'LENT','MGNT','PHOR','BELU']
     }
