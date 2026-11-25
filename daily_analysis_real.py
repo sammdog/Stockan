@@ -504,6 +504,11 @@ def main_pipeline(forecast_days=14):
         json.dump(usd.to_json(date_format="iso", orient="records"), f)
     debug_print(f"💾 Файл USD сохранён: {len(usd)} строк, последняя дата {usd['begin'].max()}")
 
+    if walk_forward:
+        from tools.walk_forward import historical_usd
+
+        usd = historical_usd(startpars, today)
+
     # ========== ОБРАБОТКА ДАННЫХ АКЦИЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("📊 Обрабатываю данные по акциям...")
     data_framest = {}

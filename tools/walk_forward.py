@@ -1,13 +1,40 @@
 """Compare Stockan-style forecasts against a historical median by date."""
 
 import json
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
+import requests
 from lightgbm import LGBMRegressor
 
 FOLD_BOUNDARIES = pd.date_range("2025-10-01", "2027-01-01", freq="QS")
 MIN_TRAIN_ROWS = 120
+
+
+def historical_usd(start, end):
+    """Get official USD rates by effective date, including valid carry-forward days."""
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    response = requests.get(
+        "https://www.cbr.ru/scripts/XML_dynamic.asp",
+        params={
+            "date_req1": (start - pd.Timedelta(days=31)).strftime("%d/%m/%Y"),
+            "date_req2": end.strftime("%d/%m/%Y"),
+            "VAL_NM_RQ": "R01235",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    rates = pd.Series({
+        pd.to_datetime(record.attrib["Date"], format="%d.%m.%Y"):
+        float(record.findtext("Value").replace(",", ".")) / int(record.findtext("Nominal"))
+        for record in ET.fromstring(response.content).findall("Record")
+    }, dtype=float).sort_index()
+    if rates.empty or rates.index.min() > start or rates.index.max() < end - pd.Timedelta(days=10):
+        raise ValueError("CBR history does not cover the requested dates")
+    daily = rates.reindex(pd.date_range(start, end), method="ffill")
+    print(f"WALK_FORWARD_USD {len(daily)} daily rates from {start.date()} to {end.date()}", flush=True)
+    return daily.rename("usdt").rename_axis("begin").reset_index()
 
 
 def refit_indices(sources, cutoff, end):
