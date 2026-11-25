@@ -39,7 +39,55 @@ jobs:
     - name: 📦 Кэширование данных (usd_data.json и model_params)
       uses: actions/cache@v4
       with:
-        path: evening_summary.json
+        path: |
+          usd_data.json
+          model_params
+        key: ${{ runner.os }}-state-cache-${{ github.run_id }}
+        restore-keys: |
+          ${{ runner.os }}-state-cache-
+          
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: 📦 Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests pandas numpy lightgbm scikit-learn joblib google-auth google-api-python-client
+    
+    - name: 🔍 Проверка необходимых файлов
+      run: |
+        echo "📁 Проверяю наличие файлов в репозитории..."
+        ls -la
+        
+        echo ""
+        echo "🔍 Проверяю наличие daily_analysis_real.py..."
+        if [ -f "daily_analysis_real.py" ]; then
+          echo "✅ Файл daily_analysis_real.py найден"
+        else
+          echo "❌ Файл daily_analysis_real.py НЕ НАЙДЕН"
+          exit 1
+        fi
+    
+    - name: 🚀 Запуск ПОЛНОГО анализа (daily_analysis_real.py)
+      env:
+        GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+        GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
+      run: |
+        echo "🚀 Запускаю ПОЛНЫЙ анализ из daily_analysis_real.py..."
+        if [ "${{ (inputs.walk_forward || github.event_name == 'push') }}" = "true" ]; then
+          STOCKAN_WALK_FORWARD=1 python daily_analysis_real.py
+        else
+          python daily_analysis_real.py
+        fi
+    
+    - name: Archive forecast for backtesting
+      if: (inputs.walk_forward || github.event_name == 'push') != true
+      uses: actions/upload-artifact@v4
+      with:
+        name: stockan-forecast
+        path: latest_results.json
         if-no-files-found: error
 
     - name: Archive walk-forward results
@@ -47,12 +95,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: stockan-walk-forward
-        path: |
-          walk_forward_predictions.csv
-          portfolio_summary.json
-          portfolio_equity.csv
-          portfolio_trades.csv
-          frequency_summary.json
+        path: evening_summary.json
         if-no-files-found: error
 
     - name: ☁️ Загрузка результатов на Google Drive
