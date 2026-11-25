@@ -11,6 +11,11 @@ on:
     - cron: '0 18 * * *'
     - cron: '0 21 * * *'
   workflow_dispatch:
+    inputs:
+      validate_only:
+        description: Run analysis and archive results without updating Google Drive
+        type: boolean
+        default: false
   
 concurrency:
   group: ${{ github.workflow }}
@@ -84,8 +89,15 @@ jobs:
         echo "🚀 Запускаю ПОЛНЫЙ анализ из daily_analysis_real.py..."
         python daily_analysis_real.py
     
+    - name: Archive forecast for backtesting
+      uses: actions/upload-artifact@v4
+      with:
+        name: stockan-forecast
+        path: latest_results.json
+        if-no-files-found: error
+
     - name: ☁️ Загрузка результатов на Google Drive
-      if: success()
+      if: success() && github.ref == 'refs/heads/main' && inputs.validate_only != true
       env:
         GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
         GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}

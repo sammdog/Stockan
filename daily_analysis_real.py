@@ -8,7 +8,7 @@ import json
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 import lightgbm
 from lightgbm import LGBMRegressor
@@ -182,61 +182,52 @@ def get_currency_rate(date):
         debug_print(f"Ошибка при запросе курса на {date.strftime('%d/%m/%Y')}: {e}")
     return None
 
-# ========== ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ BRENT (ТОЧНО КАК В GOOGLE COLAB) ==========
+# Preserve the historical series through the final trading date of BRJ6.
+BRENT_ROLL_START = date(2026, 4, 2)
+BRENT_LEGACY_CONTRACTS = ("BRU3", "BRU4", "BRU5", "BRJ6")
+BRENT_MONTH_CODES = "FGHJKMNQUVXZ"
+MAX_INPUT_AGE_DAYS = 10
+
+
 def fetch_brent_data_colab(start_date, end_date):
-    """Загружает данные Brent точно как в Google Colab"""
-    debug_print("🛢️ Загружаю данные по Brent (метод Colab)...")
-    
-    # Определяем нужные контракты на каждый год с 2023 по 2026
-    brent_contracts = ['BRU3', 'BRU4', 'BRU5', 'BRJ6']
-    
-    bre_all = []
-    loaded_contracts = []
-    
-    for contract in brent_contracts:
-        debug_print(f"  🔄 Загружаю контракт {contract}...")
-        
-        df = fetch_futures_data_colab(contract, start_date, end_date)
-        
-        if not df.empty:
-            df = df[['begin', 'close']].rename(columns={'close': 'brent'})
-            bre_all.append(df)
-            loaded_contracts.append(contract)
-            debug_print(f"    ✅ Загружено {len(df)} строк")
-            
-            # Логируем диапазон дат для этого контракта
-            if not df.empty:
-                debug_print(f"    📅 {contract}: {df['begin'].min().date()} - {df['begin'].max().date()}")
-        else:
-            debug_print(f"    ⚠️ Нет данных по контракту {contract}")
-    
-    # Объединяем все данные
-    if bre_all:
-        bre = pd.concat(bre_all, ignore_index=True)
-        bre = bre[['begin', 'brent']]
-        
-        # Сортируем по дате и удаляем дубликаты
-        bre = bre.sort_values('begin').drop_duplicates(subset='begin', keep='last')
-        
-        # Выводим информацию о диапазоне дат
-        if not bre.empty:
-            debug_print(f"📊 Всего данных Brent: {len(bre)} строк")
-            debug_print(f"📅 Диапазон данных Brent: {bre['begin'].min().date()} - {bre['begin'].max().date()}")
-            
-            # Проверяем наличие пропусков
-            date_range = pd.date_range(start=bre['begin'].min(), end=bre['begin'].max())
-            missing_dates = [d for d in date_range if d not in bre['begin'].values]
-            if missing_dates:
-                debug_print(f"⚠️ Обнаружены пропуски в данных Brent: {len(missing_dates)} дней")
-        else:
-            debug_print("⚠️ Данные Brent пусты после объединения")
-            bre = pd.DataFrame(columns=['begin', 'brent'])
-        
-        debug_print(f"✅ Успешно загружены контракты: {', '.join(loaded_contracts)}")
-        return bre
-    else:
-        debug_print("❌ Не удалось загрузить данные по Brent ни из одного контракта")
-        return pd.DataFrame(columns=['begin', 'brent'])
+    """Append next-calendar-month MOEX BR closes to the legacy history."""
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    windows = []
+    legacy_end = min(end, BRENT_ROLL_START - timedelta(days=1))
+    if start <= legacy_end:
+        windows.extend((ticker, start, legacy_end) for ticker in BRENT_LEGACY_CONTRACTS)
+
+    window_start = max(start, BRENT_ROLL_START)
+    while window_start <= end:
+        next_month = (window_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        ticker = f"BR{BRENT_MONTH_CODES[next_month.month - 1]}{next_month.year % 10}"
+        window_end = min(end, next_month - timedelta(days=1))
+        windows.append((ticker, window_start, window_end))
+        window_start = next_month
+
+    parts = []
+    for ticker, lower, upper in windows:
+        frame = fetch_futures_data_colab(ticker, lower.isoformat(), upper.isoformat())
+        if not frame.empty:
+            dates = frame["begin"].dt.date
+            frame = frame.loc[dates.between(lower, upper), ["begin", "close"]]
+            if not frame.empty:
+                parts.append(frame.rename(columns={"close": "brent"}))
+                debug_print(f"Brent {ticker}: {len(frame)} candles for {lower} to {upper}")
+                continue
+        if lower >= BRENT_ROLL_START and (end - upper).days > MAX_INPUT_AGE_DAYS:
+            raise RuntimeError(f"No Brent candles for {ticker} in {lower} to {upper}")
+
+    if not parts:
+        return pd.DataFrame(columns=["begin", "brent"])
+    # Legacy contracts overlap. Prefer the later contract in the original list.
+    brent = pd.concat(parts, ignore_index=True).drop_duplicates("begin", keep="last")
+    brent = brent.sort_values("begin").reset_index(drop=True)
+    legacy = brent.loc[brent["begin"].dt.date < BRENT_ROLL_START]
+    debug_print(f"Legacy Brent coverage: {len(legacy)} candles, last {legacy['begin'].max()}")
+    debug_print(f"Extended Brent coverage: {len(brent)} candles, last {brent['begin'].max()}")
+    return brent
 
 # ========== ОСНОВНОЙ КОД ==========
 def main_pipeline(forecast_days=14):
@@ -257,7 +248,6 @@ def main_pipeline(forecast_days=14):
             'LKOH': [5200, 5100, 4200, 3700],
             'T': [609.3, 975.3, 862.8, 864.6],
             'GMKN': [2400, 1900, 1600, 2400],
-            'PIKK': [555.7, 287.6, 322, 299.9]
         },
         'MOEXOG': {
             'GAZP': [3700, 3600, 3100, 2900],
@@ -295,7 +285,6 @@ def main_pipeline(forecast_days=14):
             'HYDR': [339.7, 226, 200.2, 185.9]
         },
         'MOEXRE': {
-            'PIKK': [555.7, 287.6, 322, 299.9],
             'SMLT': [235.5, 79.3, 74.8, 57.3],
             'LSRG': [95.2, 88.9, 76.7, 69],
             'MSTT': [61.9, 37.2, 33, 31]
@@ -328,20 +317,20 @@ def main_pipeline(forecast_days=14):
     }
     
     sectorsi = {
-        'IMOEX2': ['VTBR', 'SBER', 'LKOH', 'T', 'GAZP','GMKN','PIKK'],
+        'IMOEX2': ['VTBR', 'SBER', 'LKOH', 'T', 'GAZP','GMKN'],
         'MOEXOG': ['GAZP', 'NVTK', 'ROSN', 'TATN','LKOH'],
         'MOEXMM': ['GMKN', 'MAGN', 'NLMK', 'PLZL','MTLR'],
         'MOEXIT': ['YDEX', 'VKCO', 'ASTR', 'POSI','SOFL'],
         'MOEXFN': ['VTBR', 'SBER', 'T', 'SVCB','BSPB'],
         'MOEXEU': ['IRAO', 'UPRO','FEES','MSNG','HYDR'],
-        'MOEXRE': ['PIKK', 'SMLT','LSRG','MSTT'],
+        'MOEXRE': ['SMLT','LSRG','MSTT'],
         'MOEXTN': ['AFLT', 'FLOT','SVAV','FESH','KMAZ'],
         'MOEXCN': ['MVID', 'LENT','MGNT','PHOR','BELU']
     }
     
     startpars = '2023-05-29'
     forecast_days = 14
-    today = date.today()
+    today = datetime.now(timezone(timedelta(hours=3))).date()
     
     debug_print(f"📅 Сегодня: {today}")
     debug_print(f"📅 Стартовая дата для данных: {startpars}")
@@ -451,12 +440,11 @@ def main_pipeline(forecast_days=14):
     # ========== ЗАГРУЗКА ДАННЫХ BRENT (ТОЧНО КАК В GOOGLE COLAB) ==========
     bre = fetch_brent_data_colab(startpars, today.strftime('%Y-%m-%d'))
     
-    if bre.empty:
-        debug_print("⚠️ Не удалось загрузить данные Brent, создаю пустой DataFrame")
-        bre = pd.DataFrame(columns=['begin', 'brent'])
-    else:
-        debug_print(f"✅ Данные Brent загружены: {len(bre)} строк, последняя дата: {bre['begin'].max().date()}")
-    
+    earliest_input_date = today - timedelta(days=MAX_INPUT_AGE_DAYS)
+    if bre.empty or bre["begin"].max().date() < earliest_input_date:
+        last_brent = bre["begin"].max()
+        raise RuntimeError(f"Brent data is stale: last candle {last_brent}, expected {earliest_input_date} or later")
+
     # ========== ЗАГРУЗКА И ОБНОВЛЕНИЕ USD ДАННЫХ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("💵 Загружаю и обновляю данные по USD...")
     file_pa = 'usd_data.json'
@@ -464,29 +452,15 @@ def main_pipeline(forecast_days=14):
     try:
         with open(file_pa, 'r') as f:
             usdtt = pd.read_json(json.load(f))
-        debug_print(f"✅ Файл usd_data.json загружен: {len(usdtt)} строк")
+        usdtt["begin"] = pd.to_datetime(usdtt["begin"], format="ISO8601")
+        usdtt = usdtt.dropna(subset=["begin", "usdt"])
+        debug_print(f"💾 Кэш USD: {len(usdtt)} строк")
     except Exception as e:
         debug_print(f"⚠️ Ошибка загрузки usd_data.json: {e}")
-        debug_print("📋 Создаю новый DataFrame...")
-        usdtt = pd.DataFrame(columns=['begin', 'usdt'])
-    
-    # Определяем последнюю дату в файле
-    if usdtt.empty:
-        startusd = (today - timedelta(days=30)).strftime('%Y-%m-%d')
-        debug_print("📅 usd_data.json пуст, начинаю загрузку с 30 дней назад")
-    else:
-        startusd = usdtt['begin'].iloc[-1] if 'begin' in usdtt.columns and not usdtt.empty else (today - timedelta(days=30)).strftime('%Y-%m-%d')
-        debug_print(f"📅 Последняя дата в файле USD: {startusd}")
-    
-    # Преобразуем startusd в дату
-    try:
-        if isinstance(startusd, str):
-            start_date = datetime.strptime(startusd, '%Y-%m-%dT%H:%M:%S.%f').date()
-        else:
-            start_date = startusd.date() if hasattr(startusd, 'date') else (today - timedelta(days=30))
-    except:
-        start_date = today - timedelta(days=30)
-    
+        usdtt = pd.DataFrame(columns=["begin", "usdt"])
+
+    start_date = usdtt["begin"].max().date() if not usdtt.empty else today - timedelta(days=30)
+
     end_date = today
     
     usd_rates = {}
@@ -515,33 +489,16 @@ def main_pipeline(forecast_days=14):
         
         current_date += timedelta(days=1)
     
-    # Всегда обновляем файл
+    usd = usdtt
     if usd_rates:
-        usd_new = pd.DataFrame(list(usd_rates.items()), columns=['begin', 'usdt'])
-        usd_new['begin'] = pd.to_datetime(usd_new['begin'], format='%d/%m/%Y')
-        
-        if not usdtt.empty and 'begin' in usdtt.columns:
-            usdtt['begin'] = pd.to_datetime(usdtt['begin'])
-            usd = pd.concat([usdtt, usd_new], ignore_index=True).drop_duplicates(subset='begin', keep='last')
-        else:
-            usd = usd_new
-    else:
-        usd = usdtt.copy()
-        if not usd.empty:
-            new_row = pd.DataFrame({'begin': [pd.Timestamp(end_date)], 'usdt': [np.nan]})
-            usd = pd.concat([usd, new_row], ignore_index=True).drop_duplicates(subset='begin', keep='last')
-    
-    # Сохраняем обновленные данные
-    with open(file_pa, 'w') as f:
-        json.dump(usd.to_json(date_format='iso', orient='records'), f)
-    
-    debug_print(f"💾 Файл USD сохранен. Теперь строк: {len(usd)}, последняя дата: {usd['begin'].max() if not usd.empty else 'нет данных'}")
-    
-    if 'begin' in usd.columns:
-        usd['begin'] = pd.to_datetime(usd['begin'])
-    else:
-        usd = pd.DataFrame(columns=['begin', 'usdt'])
-    
+        usd_new = pd.DataFrame(list(usd_rates.items()), columns=["begin", "usdt"])
+        usd_new["begin"] = pd.to_datetime(usd_new["begin"], format="%d/%m/%Y")
+        usd = pd.concat([usdtt, usd_new], ignore_index=True).drop_duplicates("begin", keep="last")
+
+    with open(file_pa, "w") as f:
+        json.dump(usd.to_json(date_format="iso", orient="records"), f)
+    debug_print(f"💾 Файл USD сохранён: {len(usd)} строк, последняя дата {usd['begin'].max()}")
+
     # ========== ОБРАБОТКА ДАННЫХ АКЦИЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("📊 Обрабатываю данные по акциям...")
     data_framest = {}
@@ -604,6 +561,9 @@ def main_pipeline(forecast_days=14):
                         df[f'{column}_lag_{lag}'] = df[column].shift(lag)
             
             df.dropna(inplace=True)
+            if df.empty or df.index[-1].date() < earliest_input_date:
+                debug_print(f"Skipping {ticker}: last usable candle {df.index.max()}")
+                continue
             sector_data[ticker] = df
         
         data_framest[sector] = sector_data
@@ -738,6 +698,7 @@ def main_pipeline(forecast_days=14):
     # ========== ПРЕДСКАЗАНИЯ ==========
     debug_print("🔮 Делаю предсказания...")
     predictions = {}
+    prediction_inputs = {}
     
     for sector, secd in data_frames.items():
         for ticker in sectors[sector]:
@@ -746,6 +707,10 @@ def main_pipeline(forecast_days=14):
                     last_data = secd[ticker].drop(columns=['target']).iloc[-1].copy()
                     prediction = models[sector][ticker].predict([last_data])
                     predictions[ticker] = float(prediction[0])
+                    prediction_inputs[ticker] = {
+                        "data_date": last_data.name.date().isoformat(),
+                        "reference_close": float(last_data["ticker"]),
+                    }
                 except Exception as e:
                     debug_print(f"  ❌ Ошибка предсказания для {ticker}: {e}")
                     predictions[ticker] = 0.0
@@ -762,13 +727,19 @@ def main_pipeline(forecast_days=14):
     avg_mae = smpe / len(predictions) if predictions else 100
     accuracy = max(0, 100 - avg_mae)  # Чем меньше MAE, тем выше точность
     
+    if not prediction_inputs:
+        raise RuntimeError("No forecasts with recent input candles; results were not published")
+    input_dates = [item["data_date"] for item in prediction_inputs.values()]
+    debug_print(f"Prediction input candles: {min(input_dates)} to {max(input_dates)}")
+
     # ========== ФОРМИРОВАНИЕ РЕЗУЛЬТАТОВ ==========
-    from datetime import datetime, timezone
     
     results_data = {
-        "date": str(date.today()),
+        "date": str(today),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "predictions": predictions,
+        "prediction_inputs": prediction_inputs,
+        "forecast_horizon_rows": forecast_days,
         "medium_potential": dict(sorted(sr.items(), key=lambda item: item[1], reverse=True)),
         "high_potential": dict(sorted(mn.items(), key=lambda item: item[1], reverse=True)),
         "poor_accuracy": sppa,
@@ -796,7 +767,7 @@ def main_pipeline(forecast_days=14):
     debug_print(f"✅ Анализ завершен: {len(predictions)} акций")
     debug_print(f"🎯 Лучших акций: {len(mn)}")
     debug_print(f"📊 Средних акций: {len(sr)}")
-    debug_print(f"📈 Точность модели: {accuracy:.1f}%")
+    debug_print(f"📈 Средняя абсолютная ошибка текущей CV: {avg_mae:.1f} п.п.")
     debug_print(f"🤖 Моделей: загружено {models_loaded}, обучено новых {models_learned_today}")
     debug_print(f"📋 Ожидалось моделей: {results_data['model_stats']['expected_models']}")
     
@@ -805,7 +776,7 @@ def main_pipeline(forecast_days=14):
     print(f"📅 Дата анализа: {date.today()}")
     print(f"🎯 Высокий потенциал (>9.5%): {len(mn)} акций")
     print(f"📊 Средний потенциал (5.5-9.5%): {len(sr)} акций")
-    print(f"📈 Точность модели: {accuracy:.1f}%")
+    print(f"📈 Средняя абсолютная ошибка текущей CV: {avg_mae:.1f} п.п.")
     
     if len(mn) < 6:
         print('\nBAD DAY')
@@ -872,7 +843,7 @@ def main():
         print(f"\n✅ Анализ завершен: {len(results.get('predictions', {}))} акций")
         print(f"🎯 Лучших акций: {results.get('summary', {}).get('high_count', 0)}")
         print(f"📊 Средних акций: {results.get('summary', {}).get('medium_count', 0)}")
-        print(f"📈 Точность модели: {results.get('model_accuracy', 0)}%")
+        print(f"📈 Средняя абсолютная ошибка текущей CV: {results.get('avg_mae', 0):.1f} п.п.")
         print(f"🤖 Моделей: загружено {results.get('model_stats', {}).get('models_loaded', 0)}, обучено новых {results.get('model_stats', {}).get('models_learned_today', 0)}")
         print(f"📋 Ожидалось моделей: {results.get('model_stats', {}).get('expected_models', 0)}")
         
