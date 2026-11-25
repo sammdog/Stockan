@@ -30,7 +30,7 @@ class Position:
 def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, estimates=None, contexts=None):
     fee = fee_bps / 10_000
     signals = {
-        day: list(group["ticker"].head(10))
+        day: list(group["ticker"])
         for day, group in ranks.groupby("date", sort=True)
     }
     session_number = {day: i for i, day in enumerate(sessions)}
@@ -110,7 +110,20 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, est
         queued = []
         reserved = 0.0
         if day in schedule and day in signals:
-            for ticker in signals[day]:
+            entries = (0.0025, 0.005, 0.01, 0.015) if rules and rules.adaptive_entry else (rules.discount if rules else 0.005,)
+            targets = (0.02, 0.03, 0.04, 0.05) if rules and rules.adaptive_target else (rules.take_profit if rules else 0.03,)
+            tickers = signals[day]
+            if rules is not None and rules.rank_expected:
+                def order_edge(ticker):
+                    return max(estimates.get((month, e, t, ticker), -np.inf)
+                               for e in entries for t in targets)
+
+                tickers = sorted(tickers, key=order_edge, reverse=True)
+                if rules.min_candidates and sum(order_edge(t) >= rules.ev_threshold for t in tickers) < rules.min_candidates:
+                    counts["signals"] += min(10, len(tickers))
+                    counts["rule_skips"] += min(10, len(tickers))
+                    tickers = []
+            for ticker in tickers[:10]:
                 counts["signals"] += 1
                 bar = bars.get(ticker)
                 if bar is None:
@@ -120,8 +133,6 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0, rules=None, est
                 discount, target = 1 - ENTRY_FACTOR, EXIT_FACTOR - 1
                 if rules is not None:
                     discount, target = rules.discount, rules.take_profit
-                    entries = (0.0025, 0.005, 0.01, 0.015) if rules.adaptive_entry else (discount,)
-                    targets = (0.02, 0.03, 0.04, 0.05) if rules.adaptive_target else (target,)
                     expected, chosen_entry, chosen_target = max(
                         (estimates.get((month, e, t, ticker), -np.inf), e, t)
                         for e in entries for t in targets

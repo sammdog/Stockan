@@ -21,6 +21,8 @@ class Rules:
     cooldown: int = 0
     exposure: float = 1.0
     ev_threshold: float | None = None
+    rank_expected: bool = False
+    min_candidates: int = 0
     discount: float = 0.005
     take_profit: float = 0.03
     adaptive_entry: bool = False
@@ -36,7 +38,12 @@ def variants():
     return {
         "cooldown": {f"cooldown_{n}": {"cooldown": n} for n in (10, 20, 30)},
         "budget": {f"exposure_{n}": {"exposure": n / 100} for n in (50, 70)},
-        "ev": {f"ev_min_{n}": {"ev_threshold": n / 100} for n in (0, 0.25, 0.5, 1)},
+        "ev": {
+            **{f"ev_min_{n}": {"ev_threshold": n / 100} for n in (0, 0.25, 0.5, 1)},
+            "ev_rank_min_0": {"rank_expected": True, "ev_threshold": 0.0},
+            "ev_rank_min_0.5": {"rank_expected": True, "ev_threshold": 0.005},
+            "ev_rank_at_least_3": {"rank_expected": True, "ev_threshold": 0.005, "min_candidates": 3},
+        },
         "entry": {
             **{f"entry_{n}bp": {"discount": n / 10_000} for n in (25, 100, 150)},
             "entry_adaptive": {"adaptive_entry": True},
