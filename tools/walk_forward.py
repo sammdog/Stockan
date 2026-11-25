@@ -91,73 +91,23 @@ def summarize(results):
     return metrics
 
 
-def audit(data_frames, horizon, index_sources, index_dates, candles, as_of, actual_index):
-    all_results = []
+def audit(data_frames, horizon, index_sources, index_dates, candles, as_of, actual_index, moex_get):
+    results = []
     for cutoff, end in zip(FOLD_BOUNDARIES[:-1], FOLD_BOUNDARIES[1:]):
-        indices = refit_indices(index_sources, cutoff, end)
-        fold = []
-        pooled_train, pooled_test, pooled_y = [], [], []
-        for sector, tickers in data_frames.items():
-            if sector not in indices or "IMOEX2" not in indices:
-                continue
+        for tickers in data_frames.values():
             for ticker, frame in tickers.items():
                 dates = frame.index.to_series()
                 label_end = dates.shift(-horizon)
                 train = label_end < cutoff
-                # Leave the newest source row out because it can be an unfinished candle.
                 test = (dates >= cutoff) & (dates < end) & (label_end < dates.iloc[-1])
-                if train.sum() < MIN_TRAIN_ROWS or not test.any():
-                    continue
-                selected = frame.loc[train | test]
-                features = dated_features(selected, index_dates[sector, ticker],
-                                          indices[sector], indices["IMOEX2"])
-                y = frame.loc[train, "target"]
-                x_train, x_test = features.loc[train.loc[features.index]], features.loc[test.loc[features.index]]
-                relative_train = relative_features(x_train)
-                relative_test = relative_features(x_test)
-                forecast = {
-                    name: model_forecast(x_train, y, x_test, name)
-                    for name in MODEL_PARAMETERS
-                }
-                forecast["relative_l1"] = model_forecast(relative_train, y, relative_test, "relative_l1")
-                pooled_train.append(relative_train.assign(ticker_category=ticker))
-                pooled_test.append(relative_test.assign(ticker_category=ticker))
-                pooled_y.append(y)
-                fold.append(pd.DataFrame({
-                    "date": x_test.index,
-                    "ticker": ticker,
-                    "actual": frame.loc[test, "target"].to_numpy(),
-                    "median": y.median(),
-                    "recent_drop": relative_test["ticker_change_28"].to_numpy() <= -0.15,
-                    **forecast,
-                }))
-        if fold:
-            results = pd.concat(fold, ignore_index=True)
-            x_pool = pd.concat(pooled_train, ignore_index=True)
-            x_pool_test = pd.concat(pooled_test, ignore_index=True)
-            categories = pd.CategoricalDtype(sorted(x_pool["ticker_category"].unique()))
-            x_pool["ticker_category"] = x_pool["ticker_category"].astype(categories)
-            x_pool_test["ticker_category"] = x_pool_test["ticker_category"].astype(categories)
-            results["pooled_relative_l1"] = model_forecast(
-                x_pool, pd.concat(pooled_y, ignore_index=True), x_pool_test, "pooled_relative_l1"
-            )
-            all_results.append(results)
-            print_report(cutoff.date().isoformat(), results)
-    if not all_results:
-        raise ValueError("No complete walk-forward folds")
-    results = pd.concat(all_results, ignore_index=True)
-    print_report("all", results)
-    stress = results.loc[results["date"].between("2026-03-01", "2026-05-31")]
-    if not stress.empty:
-        print_report("mar-may-2026", stress)
-    falling = results.loc[results["recent_drop"]]
-    if not falling.empty:
-        print_report("after-drop-ge15-in-28-rows", falling)
-    results.to_csv("walk_forward_predictions.csv", index=False)
+                if train.sum() >= MIN_TRAIN_ROWS and test.any():
+                    results.append(pd.DataFrame({
+                        "date": frame.index[test], "ticker": ticker,
+                        "median": frame.loc[train, "target"].median(),
+                    }))
+    from tools.evening_backtest import audit as evening_audit
 
-    from tools.portfolio_backtest import audit_portfolios
-
-    audit_portfolios(results, candles, as_of, actual_index)
+    evening_audit(pd.concat(results, ignore_index=True), candles, as_of, moex_get)
 
 
 def print_report(period, results):

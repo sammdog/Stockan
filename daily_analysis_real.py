@@ -601,7 +601,7 @@ def main_pipeline(forecast_days=14):
         actual_index = fetch_shares_data_colab("IMOEX", startpars, today.isoformat(), is_index=True)
         if actual_index.empty:
             raise RuntimeError("IMOEX history unavailable for trading rules")
-        audit(data_frames, forecast_days, index_sources, index_dates, audit_candles, today, actual_index)
+        audit(data_frames, forecast_days, index_sources, index_dates, audit_candles, today, actual_index, moex_get)
         raise SystemExit(0)
 
     # ========== ОБУЧЕНИЕ МОДЕЛЕЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
