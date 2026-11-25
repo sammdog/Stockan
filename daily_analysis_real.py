@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime, date, timedelta
+from pathlib import Path
 import lightgbm
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import GridSearchCV, cross_val_score
@@ -36,11 +37,18 @@ def save_debug_data(data, filename):
 
 import socket
 
+MOEX_CA_BUNDLE = Path(__file__).resolve().parent / "certs" / "moex-ca.pem"
+
+
+def moex_get(url, **kwargs):
+    return requests.get(url, verify=str(MOEX_CA_BUNDLE), **kwargs)
+
+
 def check_moex_connectivity():
     """Проверяет, доступен ли MOEX ISS API."""
     test_url = "https://iss.moex.com/iss/engines/stock/markets/shares/securities/SBER/candles.json?from=2024-01-01&till=2024-01-04&interval=24"
     try:
-        r = requests.get(test_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+        r = moex_get(test_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
         if r.status_code == 200:
             return True
     except Exception as e:
@@ -73,7 +81,7 @@ def fetch_shares_data_colab(ticker, start_date, end_date, is_index=False):
         debug_print(f"    🔄 Запрос строк {start_row} - {start_row + limit_rows}...")
         
         try:
-            response = requests.get(url, timeout=30)
+            response = moex_get(url, timeout=30)
             if response.status_code == 200:
                 data = response.json()
                 
@@ -124,7 +132,7 @@ def fetch_futures_data_colab(ticker, start_date, end_date):
     url = f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{ticker}/candles.json?from={start_date}&till={end_date}&interval=24"
     
     try:
-        response = requests.get(url, timeout=30)
+        response = moex_get(url, timeout=30)
         if response.status_code == 200:
             data = response.json()
             if 'candles' in data and 'data' in data['candles'] and data['candles']['data']:
