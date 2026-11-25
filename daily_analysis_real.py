@@ -340,6 +340,9 @@ def main_pipeline(forecast_days=14):
     # ========== ЗАГРУЗКА ИНДЕКСОВ СЕКТОРОВ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("🔧 Загружаю и рассчитываю индексы секторов...")
     ind = {}
+    walk_forward = os.environ.get("STOCKAN_WALK_FORWARD") == "1"
+    index_sources = {}
+    index_dates = {}
     
     for sector, tickers in sectorsi.items():
         debug_print(f"  📈 Обрабатываю сектор: {sector}")
@@ -426,6 +429,8 @@ def main_pipeline(forecast_days=14):
         
         # Предсказываем на всех данных
         ccomb.set_index('begin', inplace=True)
+        if walk_forward:
+            index_sources[sector] = (X, y, ccomb)
         pred = model.predict(ccomb)
         
         # Сохраняем предсказания
@@ -554,6 +559,8 @@ def main_pipeline(forecast_days=14):
             
             df.dropna(inplace=True)
             
+            if walk_forward:
+                index_dates[sector, ticker] = df.index.copy()
             # Добавляем лаги
             for column in df.columns:
                 for lag in [7, 14, 28, 35, 31]:
@@ -596,6 +603,12 @@ def main_pipeline(forecast_days=14):
         
         data_frames[sector] = sector_data
     
+    if walk_forward:
+        from tools.walk_forward import audit
+
+        audit(data_frames, forecast_days, index_sources, index_dates)
+        raise SystemExit(0)
+
     # ========== ОБУЧЕНИЕ МОДЕЛЕЙ (ТОЧНО КАК В GOOGLE COLAB) ==========
     debug_print("🤖 Обучаю модели...")
     param_grid = {
