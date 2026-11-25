@@ -34,6 +34,7 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0):
     eligible = [day for day in sessions if first <= day <= last]
     schedule = set(eligible[phase::2])
     cash = capital
+    cost = ORDER_VALUE * (1 + fee)
     positions = []
     queued = []
     counts = dict(signals=0, filled=0, expired=0, cash_skips=0, missing=0, sold=0, sold_within_14_days=0)
@@ -41,7 +42,6 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0):
     trades, equity = [], []
     for day in sessions[session_number[first]:]:
         bars = market.get(day, {})
-        buying_power = cash
         remaining = []
         for position in positions:
             bar = bars.get(position.ticker)
@@ -60,15 +60,10 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0):
 
         for ticker, buy_limit in queued:
             bar = bars.get(ticker)
-            cost = ORDER_VALUE * (1 + fee)
             if bar is None or bar[0] > buy_limit:
                 counts["expired"] += 1
                 continue
-            if buying_power + 1e-8 < cost:
-                counts["cash_skips"] += 1
-                continue
             cash -= cost
-            buying_power -= cost
             positions.append(Position(ticker, day, ORDER_VALUE / buy_limit, cost, buy_limit * EXIT_FACTOR, bar[2]))
             counts["filled"] += 1
             trades.append((day, ticker, "buy", buy_limit, -cost, None))
@@ -80,6 +75,8 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0):
                 bar = bars.get(ticker)
                 if bar is None:
                     counts["missing"] += 1
+                elif cash + 1e-8 < (len(queued) + 1) * cost:
+                    counts["cash_skips"] += 1
                 else:
                     queued.append((ticker, bar[2] * ENTRY_FACTOR))
 
@@ -93,6 +90,7 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0):
     drawdown = (daily["equity"] / peaks - 1).min()
     summary = {
         **counts,
+        "pending": len(queued),
         "net_pnl": round(float(last.equity - capital), 2),
         "return_pct": round(float((last.equity / capital - 1) * 100), 3),
         "realized_pnl": round(realized, 2),
@@ -107,7 +105,7 @@ def simulate(ranks, market, sessions, capital, fee_bps, phase=0):
         str(month): round(float(delta), 2)
         for month, delta in (by_month - by_month.shift(fill_value=capital)).items()
     }
-    assert counts["signals"] == counts["filled"] + counts["expired"] + counts["cash_skips"] + counts["missing"]
+    assert counts["signals"] == counts["filled"] + counts["expired"] + counts["cash_skips"] + counts["missing"] + len(queued)
     assert abs(summary["net_pnl"] - summary["realized_pnl"] - summary["open_pnl"]) <= 0.021
     return summary, daily, pd.DataFrame(trades, columns=["date", "ticker", "side", "price", "cash_delta", "realized_pnl"])
 
