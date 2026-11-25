@@ -560,19 +560,25 @@ def main_pipeline(forecast_days=14):
     debug_print(f"✅ Обработаны данные по {sum(len(v) for v in data_framest.values())} акциям")
     
     # Use a common completed source session and preserve the historical target.
-    if not order_candles:
+    frames = {ticker: frame for group in data_framest.values() for ticker, frame in group.items()}
+    if not frames or not order_candles:
         raise RuntimeError("No completed stock candles available")
-    signal_date = max(frame.index.max() for frame in order_candles.values())
+    signal_date = max(frame.index.max() for frame in frames.values())
+    latest_stock_date = max(frame.index.max() for frame in order_candles.values())
     if signal_date.date() < earliest_input_date:
         raise RuntimeError(f"Stock candles are stale: {signal_date.date()}")
-    frames = {ticker: frame for group in data_framest.values() for ticker, frame in group.items()}
+    trade_plan_block = (
+        "Свежая сессия акций ещё не совпадает с датами всех источников."
+        if signal_date < latest_stock_date else None
+    )
     ranking = sorted(median_forecasts(frames, signal_date, forecast_days), key=lambda row: (-row[1], row[0]))
     if not ranking:
         raise RuntimeError(f"No median forecasts for the latest completed session {signal_date.date()}")
     edge = expected_returns(order_candles, signal_date)
     if not edge:
         raise RuntimeError("No historical order return estimates")
-    eligible = {ticker for ticker, _, _ in ranking[:MAX_CANDIDATES] if edge.get(ticker, -np.inf) >= MIN_EDGE}
+    eligible = ({ticker for ticker, _, _ in ranking[:MAX_CANDIDATES]
+                 if edge.get(ticker, -np.inf) >= MIN_EDGE} if not trade_plan_block else set())
     metadata = board_details(moex_get, eligible)
     if eligible - metadata.keys():
         debug_print(f"Missing TQBR lot metadata: {', '.join(sorted(eligible - metadata.keys()))}")
@@ -592,6 +598,7 @@ def main_pipeline(forecast_days=14):
         "medium_potential": {ticker: score for ticker, score in predictions.items() if 5.5 < score < 9.5},
         "high_potential": {ticker: score for ticker, score in predictions.items() if score >= 9.5},
         "trade_candidates": candidates,
+        "trade_plan_block": trade_plan_block,
         "missing_trade_metadata": sorted(eligible - metadata.keys()),
         "trade_fee_bps": 5,
         "trade_notional_cap_rub": 1000,

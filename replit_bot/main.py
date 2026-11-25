@@ -24,7 +24,10 @@ def parse_capital(text):
         raise ValueError("Укажи сумму числом, например /capital 7500,50") from exc
     if not capital.is_finite() or capital <= 0 or capital > Decimal("1000000000000"):
         raise ValueError("Укажи положительную сумму в рублях")
-    return capital.quantize(CENT, rounding=ROUND_FLOOR)
+    capital = capital.quantize(CENT, rounding=ROUND_FLOOR)
+    if capital == 0:
+        raise ValueError("Укажи хотя бы 0,01 ₽")
+    return capital
 
 
 def allocate(report, capital):
@@ -74,7 +77,7 @@ def format_candidates(report):
     lines.append(f"Свеча: {report['signal_date']}")
     candidates = report["trade_candidates"]
     if not candidates:
-        lines.append("Сегодня нет заявок по критериям стратегии.")
+        lines.append(report.get("trade_plan_block") or "Сегодня нет заявок по критериям стратегии.")
     for item in candidates:
         lines.extend((
             f"• {item['ticker']} · {item['name']}",
@@ -126,6 +129,9 @@ def build_bot(token, file_id, owner_id):
             stamp = datetime.fromisoformat(report["timestamp"].replace("Z", "+00:00")).astimezone(MSK)
             if stamp.date() != datetime.now(MSK).date():
                 bot.reply_to(message, "Для расчёта заявок нужен отчёт, сформированный сегодня по МСК.")
+                return
+            if report.get("trade_plan_block"):
+                bot.reply_to(message, report["trade_plan_block"])
                 return
             orders, remaining = allocate(report, capital)
         except (requests.RequestException, ArithmeticError, ValueError, KeyError, TypeError):
