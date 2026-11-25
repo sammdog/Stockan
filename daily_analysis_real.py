@@ -382,6 +382,7 @@ def main_pipeline(forecast_days=14):
     walk_forward = os.environ.get("STOCKAN_WALK_FORWARD") == "1"
     index_sources = {}
     index_dates = {}
+    audit_candles = {}
     
     for sector, tickers in sectorsi.items():
         debug_print(f"  📈 Обрабатываю сектор: {sector}")
@@ -505,6 +506,8 @@ def main_pipeline(forecast_days=14):
                 debug_print(f"  ⚠️ Пропускаю {ticker} - нет данных")
                 continue
             
+            if walk_forward:
+                audit_candles[ticker] = df[["begin", "low", "high", "close"]].copy()
             df = df[['begin', 'close', 'volume']].rename(columns={'close': 'ticker'})
             
             # Проверяем, что есть достаточно данных
@@ -595,7 +598,7 @@ def main_pipeline(forecast_days=14):
     if walk_forward:
         from tools.walk_forward import audit
 
-        audit(data_frames, forecast_days, index_sources, index_dates)
+        audit(data_frames, forecast_days, index_sources, index_dates, audit_candles, today)
         raise SystemExit(0)
 
     # ========== ОБУЧЕНИЕ МОДЕЛЕЙ (ТОЧНО КАК В GOOGLE COLAB) ==========

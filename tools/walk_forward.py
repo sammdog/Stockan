@@ -91,7 +91,7 @@ def summarize(results):
     return metrics
 
 
-def audit(data_frames, horizon, index_sources, index_dates):
+def audit(data_frames, horizon, index_sources, index_dates, candles, as_of):
     all_results = []
     for cutoff, end in zip(FOLD_BOUNDARIES[:-1], FOLD_BOUNDARIES[1:]):
         indices = refit_indices(index_sources, cutoff, end)
@@ -154,6 +154,10 @@ def audit(data_frames, horizon, index_sources, index_dates):
     if not falling.empty:
         print_report("after-drop-ge15-in-28-rows", falling)
     results.to_csv("walk_forward_predictions.csv", index=False)
+
+    from tools.portfolio_backtest import audit_portfolios
+
+    audit_portfolios(results, candles, as_of)
 
 
 def print_report(period, results):

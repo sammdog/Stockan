@@ -93,7 +93,11 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: stockan-walk-forward
-        path: walk_forward_predictions.csv
+        path: |
+          walk_forward_predictions.csv
+          portfolio_summary.json
+          portfolio_equity.csv
+          portfolio_trades.csv
         if-no-files-found: error
 
     - name: ☁️ Загрузка результатов на Google Drive
