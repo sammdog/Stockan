@@ -4,6 +4,8 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+from pathlib import Path
+from threading import Lock
 
 import requests
 import telebot
@@ -91,11 +93,26 @@ def format_candidates(report):
 
 def build_bot(token, file_id, owner_id):
     bot = telebot.TeleBot(token)
+    users_path = Path("users.txt")
+    users_lock = Lock()
 
-    @bot.message_handler(commands=["start", "help", "about"])
+    @bot.message_handler(commands=["start", "help"])
     def help_command(message):
+        try:
+            with users_lock:
+                users = users_path.read_text(encoding="utf-8").splitlines() if users_path.exists() else []
+                if str(message.from_user.id) not in users:
+                    with users_path.open("a", encoding="utf-8") as file:
+                        file.write(f"{message.from_user.id}\n")
+        except OSError:
+            logging.exception("Could not update users.txt")
         bot.reply_to(message, "Stockan\n/results — список рекомендаций\n/status — дата отчёта\n"
                               "/capital 7500 — расчёт целых лотов в личном чате владельца.")
+
+    @bot.message_handler(commands=["about"])
+    def about(message):
+        bot.reply_to(message, "Stockan · Анализ акций Московской биржи. "
+                              "Рейтинг по медиане, фильтр ожидаемого результата заявки, тейк +3%.")
 
     @bot.message_handler(commands=["results", "status"])
     def results(message):
@@ -103,11 +120,15 @@ def build_bot(token, file_id, owner_id):
             report = fetch_report(file_id)
             if message.text.split()[0].split("@")[0] == "/status":
                 stamp = datetime.fromisoformat(report["timestamp"].replace("Z", "+00:00")).astimezone(MSK)
-                text = f"Отчёт: {stamp:%d.%m.%Y %H:%M} МСК\nСвеча: {report.get('signal_date', 'неизвестно')}"
+                age = (datetime.now(MSK) - stamp).total_seconds() / 3600
+                with users_lock:
+                    users = len(users_path.read_text(encoding="utf-8").splitlines()) if users_path.exists() else 0
+                text = (f"Отчёт: {stamp:%d.%m.%Y %H:%M} МСК · {age:.1f} ч назад\n"
+                        f"Свеча: {report.get('signal_date', 'неизвестно')}\nПользователей: {users}")
             else:
                 text = format_candidates(report)
             bot.reply_to(message, text)
-        except (requests.RequestException, ValueError, KeyError, TypeError):
+        except (requests.RequestException, OSError, ValueError, KeyError, TypeError):
             logging.exception("Could not load Stockan report")
             bot.reply_to(message, "Не удалось прочитать отчёт Stockan.")
 
@@ -159,6 +180,7 @@ if __name__ == "__main__":
         types.BotCommand("results", "Рекомендации"),
         types.BotCommand("capital", "Рассчитать заявки на сумму"),
         types.BotCommand("status", "Дата отчёта"),
+        types.BotCommand("about", "О проекте"),
         types.BotCommand("help", "Справка"),
     ])
     bot.infinity_polling(timeout=30)
